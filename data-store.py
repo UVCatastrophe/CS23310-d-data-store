@@ -2,19 +2,28 @@ import zmq
 
 #The state for the current process
 proc = process()
+#Dictionary which maps keys to values once they have been comitted
+data_store = {}
 
 #Class which contains the necessary state for the process to run
 class process:
     def __init__(self):
         return
-    #Connect to the socket sock and update the process's context/socket
-    def connect(self,sock):
-        self.context = zmq.Context()
-        self.socket = self.context.socket(zmq.REQ)
-        self.socket.connect(sock)
+    #Connect to the socket sock which is used to send messages
+    #and update the process's context/socket
+    def connectSend(self,sock):
+        if self.context == None:
+            self.context = zmq.Context()
+        self.socketSend = self.context.socket(zmq.REQ)
+        self.socketSend.connect(sock)
+    def connectRecv(self,sock):
+        if self.context == None:
+            self.context = zmq.Context()
+        self.socketRecv = self.context.socket(zmq.SUB)
+        self.socketRecv.connect(sock)
     #Read the message from the (bound) socket and return the result
     def read_message(self):
-        return self.socket.recv()
+        return self.socketRecv.recv()
 
 #The class which contains the relavent information to run
 # a round of paxos.
