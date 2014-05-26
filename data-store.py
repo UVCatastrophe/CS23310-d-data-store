@@ -1,3 +1,21 @@
+import zmq
+
+#The state for the current process
+proc = process()
+
+#Class which contains the necessary state for the process to run
+class process:
+    def __init__(self):
+        return
+    #Connect to the socket sock and update the process's context/socket
+    def connect(self,sock):
+        self.context = zmq.Context()
+        self.socket = self.context.socket(zmq.REQ)
+        self.socket.connect(sock)
+    #Read the message from the (bound) socket and return the result
+    def read_message(self):
+        return self.socket.recv()
+
 #The class which contains the relavent information to run
 # a round of paxos.
 class paxos_message:
@@ -23,19 +41,18 @@ class transaction_message:
     def __init__(self):
         return
 
-#The main message loop:
+#--The main message loop--
+#Before the loop begins, bind to the given socket
+#After entering the loop:
 #Read the message, parse it, and then respond to it
 #based upon the state of the process.
-def message_loop():
+def message_loop(sock):
+    proc.connect(sock)
     while True:
-        msg = read_message()
+        msg = proc.read_message()
         res = parse_message(msg)
         if handle_message(res):
             return
-
-#Read the message from the socket and return the result
-def read_message():
-    return ""
 
 #Parse the json message into a friendly python object
 def parse_message(msg):
