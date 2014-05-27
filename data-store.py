@@ -10,11 +10,19 @@ class RAFT_instance:
         self.commitIndex = 0#Index into the log of the highest log entry that has been commited
         self.lastApplied = 0#the index of the highest log entry applied
 
+        self.leader = 0 #Best guess at the current leader...
         self.isLeader = False #All process begin in "follower" mode
 
         #State used when the process is a leader
         self.nextIndex = [] #index of the next log entry to send to each server
         self.matchIndex = [] #index of the highest log enty which has been replicated on each server
+
+    #Updates a LEADER's commit index to the lowest value in matchIndex
+    def update_commitIndex(self):
+        mn = self.matchIndex[0]
+        for i in self.matchIndex:
+            mn = min(mn, i)
+        self.commitIndex = mn
 
 #Class which contains the necessary state for the process to connect over a socket
 class sock_state:
@@ -42,18 +50,19 @@ class append_message:
         self.term = term #The term of the current leader
         self.leader = leader #The id of the current leader
         self.prevLogIndex = prevLogIndex #index of the log entry precieding "log_entries"
-        self.prevLogTerm = prevLogTerm #term corresponding to preLogIndex
+        self.prevLogTerm = prevLogTerm #term corresponding to prevLogIndex
         self.entries = log_entries #entries to be appended to the log. See above for format
         self.leaderCommit = leaderCommit #The commit index of the leader
         self.sender = sender #Should be the leader.
         self.recpt = recpt #Should be the same id as the process
 
 class appendReply_message:
-    def __init__(self,term,prevLogIndex,status,msg_id,sender,recpt):
+    def __init__(self,term,prevLogIndex,log_len,status,msg_id,sender,recpt):
         self.sender = sender
         self.recpt = recpt
         self.term = term
         self.prevLogIndex = prevLogIndex #From the append message. Used to identify messages.
+        self.log_len = log_len #The number of log entries which this message is accepting
         self.status = status #Either true or false for success or failure
 
 #Sent by a candidate to request a vote
@@ -82,12 +91,27 @@ class byzantine_message:
 
 #A message, probably sent by a user
 class transaction_message:
-    def __init__(self,key,val,sender,recpt):
+    def __init__(self,key,val,action,sender,recpt):
         self.key = key
         self.val = val
         self.sender = sender
         self.recpt = recpt
         return
+
+#Responses:
+    #BAD_KEY - No such key to be read in the datastore
+    #TIMEOUT - Timeout before being able to read a value
+    #LEADER - The message was not sent to a current leader. Val has the name of the current leader if applicable.
+    #READ - Given key was read and value is stored as 'value'
+    #WRITE - Given key-val has been commited to the data-store
+class transactionReply_message:
+    def __init__(self,key,value,action,response,sender,recpt):
+        self.key = key
+        self.value = value #Possibly a returned value
+        self.action = action
+        self.response = response #See above
+        self.sender = sender
+        self.recpt = recpt
 
 #The state for the currect process' sockets
 proc = sock_state()
@@ -96,9 +120,16 @@ raft = RAFT_instance()
 #Dictionary which maps keys to values once they have been comitted
 data_store = {}
 
+#Handles a transaction message (usually sent from a user)
+def handle_transaction(msg):
+    if not raft.isLeader:
+        reply_msg = transactionReply_message(msg.key,raft.leader,msg.action,"LEADER",msg.sender,msg.recpt)
+        #Send them the location of the leader
+        return
+
 #responds to an append message with the given status
 def append_response(msg,status):
-    res = appendReply(msg.term,msg.prevLogIndex,status,msg.recpt,msg.sender)
+    res = appendReply(msg.term,msg.prevLogIndex,len(msg.log_entries),status,msg.recpt,msg.sender)
     #Now send the message to the broker***
     return
 
@@ -147,6 +178,40 @@ def handle_append(msg):
     else:
         apply_logs(msg)
         append_response(msg,True)
+
+#constructs and then sends an append request to the given sender
+def append_request(sender):
+    prevIndex = raft.matchIndex[sender]
+    prevTerm = raft.log[prevIndex][0]
+    msg = append_message(raft.currentTerm,raft.name,prevIndex,prevTerm,\
+                         raft.commitIndex,raft.name,sender)
+    #TODO: send the message to the message broker
+    return
+    
+
+#Handles the response to a append message sent by a leader to the a follower.
+#Either learns of its success and moves toward a quorum, or decrements
+#its index to find a place where their logs are in sync.
+def handle_appendReply(msg):
+    if msg.term < raft.currentTerm:
+        #message lost in the network, ignore
+        return
+    #This should never happen
+    if msg.term > raft.currentTerm:
+        print "Error: Follower " + str(msg.sender) + " is responding to the wrong master, or has the wrong term number"
+        return
+    if msg.status:#An accepting message
+        m = max(l, msg.prevLogIndex + msg.num_logs,raft.matchIndex[msg.sender])
+        raft.matchIndex[msg.sender] = m
+        raft.nextIndex[msg.sender] = m+1
+        raft.update_CommitIndex()
+    else:
+        if raft.matchIndex[msg.sender] > msg.prevLogIndex:
+            #stale message
+            return
+        raft.nextIndex[msg.sender] = min(msg.prevLogIndex-1,raft.nextInsex[msg.sender])
+        append_request(msg.sender)
+        return
 
 #--The main message loop--
 #Before the loop begins, bind to the given socket
