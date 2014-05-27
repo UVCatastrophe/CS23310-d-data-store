@@ -1,28 +1,23 @@
 import zmq
 
-#The state for the currect process' sockets
-proc = process()
-#The state for the current process' RAFT_instance
-raft = RAFT_instance()
-#Dictionary which maps keys to values once they have been comitted
-data_store = {}
-
 #Class with all the state necessary for an instance of RAFT
 class RAFT_instance:
     def __init__(self):
         self.currentTerm = 0 #The latest term the server has seen (monotonicly increasing)
         self.votedFor = None #The id of the last candidate vvoted for
-        self.log = [] #A list of log entries 4-tuple (Log#,command,key,value)
+        self.log = [] #A list of log entries 4-tuple (term,command,key,value)
 
-        self.commitIndex #Index into the log of the highest log entry that has been commited
-        self.lastApplied #the index of the highest log entry applied
+        self.commitIndex = 0#Index into the log of the highest log entry that has been commited
+        self.lastApplied = 0#the index of the highest log entry applied
+
+        self.isLeader = False #All process begin in "follower" mode
 
         #State used when the process is a leader
         self.nextIndex = [] #index of the next log entry to send to each server
         self.matchIndex = [] #index of the highest log enty which has been replicated on each server
 
 #Class which contains the necessary state for the process to connect over a socket
-class process:
+class sock_state:
     def __init__(self):
         return
     #Connect to the socket sock which is used to send messages
@@ -52,6 +47,14 @@ class append_message:
         self.leaderCommit = leaderCommit #The commit index of the leader
         self.sender = sender #Should be the leader.
         self.recpt = recpt #Should be the same id as the process
+
+class appendReply_message:
+    def __init__(self,term,prevLogIndex,status,msg_id,sender,recpt):
+        self.sender = sender
+        self.recpt = recpt
+        self.term = term
+        self.prevLogIndex = prevLogIndex #From the append message. Used to identify messages.
+        self.status = status #Either true or false for success or failure
 
 #Sent by a candidate to request a vote
 class requestVote_message:
@@ -85,6 +88,65 @@ class transaction_message:
         self.sender = sender
         self.recpt = recpt
         return
+
+#The state for the currect process' sockets
+proc = sock_state()
+#The state for the current process' RAFT_instance
+raft = RAFT_instance()
+#Dictionary which maps keys to values once they have been comitted
+data_store = {}
+
+#responds to an append message with the given status
+def append_response(msg,status):
+    res = appendReply(msg.term,msg.prevLogIndex,status,msg.recpt,msg.sender)
+    #Now send the message to the broker***
+    return
+
+#Update the 'commited' index of the current raft instance
+#given an append_message msg
+def update_commit(msg):
+    if msg.leaderCommit > raft.commitIndex:
+        raft.commitIndex = min(msg.leaderCommit, msg.prevLogIndex)
+    return
+
+#Apply the given logs (in the append message)
+# to the current log for this instance
+def apply_log(msg):
+    #Remove any uncommited entries that conflict
+    for i in range(msg.prevLogIndex,raft.lastApplied+1):
+        raft.log.pop(i)
+
+    for log in msg.log_entries:
+        raft.log.append(log)
+    raft.lastApplied = len(raft.log)-1
+
+#Handles an append message (supposedly) from the master
+def handle_append(msg):
+    #A new leader has been elected
+    if msg.term > raft.currentTerm:
+        raft.currentTerm = msg.term
+        raft.isLeader = False
+        return
+    if msg.term < raft.currentTerm:
+        return #Message that is necessarily out of date. Should reject.
+
+    if raft.isMaster:
+        print "Error, two masters operating with the same term number"
+        return
+    
+    update_commit(msg) #Update commit index. Done even for hearbeat message
+
+    #Heartbeat message
+    if len(msg.log_entries) == 0:
+        append_response(msg, True)
+    
+    lastTerm = raft.log[msg.prevLogIndex][0] #Term of last commited entry
+    #Log is inconsistent with respect to master
+    if not(lastTerm == msg.prevLogTerm):
+        append_response(msg,False)
+    else:
+        apply_logs(msg)
+        append_response(msg,True)
 
 #--The main message loop--
 #Before the loop begins, bind to the given socket
