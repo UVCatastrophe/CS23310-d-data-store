@@ -1,8 +1,11 @@
 import zmq
+import argparse
+from zmq.eventloop import ioloop, zmqstream
+ioloop.install()
 
 #Class with all the state necessary for an instance of RAFT
 class RAFT_instance:
-    def __init__(self):
+    def __init__(self,name,peers,isLeader):
         self.currentTerm = 0 #The latest term the server has seen (monotonicly increasing)
         self.votedFor = None #The id of the last candidate vvoted for
         self.log = [] #A list of log entries 4-tuple (term,command,key,value)
@@ -10,12 +13,23 @@ class RAFT_instance:
         self.commitIndex = 0#Index into the log of the highest log entry that has been commited
         self.lastApplied = 0#the index of the highest log entry applied
 
-        self.leader = 0 #Best guess at the current leader...
-        self.isLeader = False #All process begin in "follower" mode
+        self.name = name #The name of the current node
 
-        #State used when the process is a leader
-        self.nextIndex = [] #index of the next log entry to send to each server
-        self.matchIndex = [] #index of the highest log enty which has been replicated on each server
+        self.leader = 0 #Best guess at the current leader...
+        #All process begin in "follower" mode in a normal execution.
+        #Variable is used for testing.
+        self.isLeader = isLeader 
+
+        #--State used when the process is a leader--
+
+        #Both are ditionaries which map peer-name to a numeric value
+        self.nextIndex = {} #index of the next log entry to send to each server
+        self.matchIndex = {} #index of the highest log enty which has been replicated on each server
+
+        #Initialize for each peer
+        for peer in peers:
+            self.nextIndex[peer] = 0
+            self.matchIndex[peer] = 0
 
     #Updates a LEADER's commit index to the lowest value in matchIndex
     def update_commitIndex(self):
@@ -27,19 +41,27 @@ class RAFT_instance:
 #Class which contains the necessary state for the process to connect over a socket
 class sock_state:
     def __init__(self):
+        self.loop = ioloop.ZMQIOLoop.current
+        self.context = zmq.Context()
         return
     #Connect to the socket sock which is used to send messages
     #and update the process's context/socket
     def connectSend(self,sock):
-        if self.context == None:
-            self.context = zmq.Context()
         self.socketSend = self.context.socket(zmq.REQ)
         self.socketSend.connect(sock)
+        self.send = zmqstream.ZMQStream(self.socketSend,self.loop)
+        self.send.on_recv(handle)
+    #Connect to the socket (sock) which is used to recieve messages from the broker
     def connectRecv(self,sock):
-        if self.context == None:
-            self.context = zmq.Context()
         self.socketRecv = self.context.socket(zmq.SUB)
         self.socketRecv.connect(sock)
+        self.socketRecv.set(zmq.SUBSCRIBE, self.name)
+        self.recv = zmqstream.ZMQStream(self.socketRecv,self.loop)
+        self.recv.on_recv(handle_broker_message)
+    #Closes send and recv sockets
+    def close_all(self):
+        self.socketSend.close()
+        self.socketRecv.close()
     #Read the message from the (bound) socket and return the result
     def read_message(self):
         return self.socketRecv.recv()
@@ -113,13 +135,6 @@ class transactionReply_message:
         self.sender = sender
         self.recpt = recpt
 
-#The state for the currect process' sockets
-proc = sock_state()
-#The state for the current process' RAFT_instance
-raft = RAFT_instance()
-#Dictionary which maps keys to values once they have been comitted
-data_store = {}
-
 #Handles a transaction message (usually sent from a user)
 def handle_transaction(msg):
     if not raft.isLeader:
@@ -187,7 +202,15 @@ def append_request(sender):
                          raft.commitIndex,raft.name,sender)
     #TODO: send the message to the message broker
     return
-    
+
+#Handle a message recived on the send socket.
+#This will be either raw messages from clients or the hello message from the broker
+def handle(msg_frames):
+    return
+
+#Handles a protocol message delivered by the broker
+def handle_broker_message(msg_frames):
+    return
 
 #Handles the response to a append message sent by a leader to the a follower.
 #Either learns of its success and moves toward a quorum, or decrements
@@ -235,4 +258,42 @@ def parse_message(msg):
 #return False othermise
 def handle_message(res):
     return True
-    
+
+def send_message(msg):
+    return
+
+
+#--------------------Initialization-------------------------------
+#The state for the currect process' sockets
+proc = sock_state()
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--pub-endpoint',
+  dest='pub_endpoint', type=str,
+  default='tcp://127.0.0.1:23310')
+parser.add_argument('--router-endpoint',
+  dest='router_endpoint', type=str,
+  default='tcp://127.0.0.1:23311')
+parser.add_argument('--node-name',
+  dest='node_name', type=str,
+  default='test_node')
+parser.add_argument('--spammer',
+  dest='spammer', action='store_true')
+parser.set_defaults(spammer=False)
+parser.add_argument('--peer-names',
+  dest='peer_names', type=str,
+  default='')
+#Used to skip master election for testing.
+parser.add_argument('--test-isMaster',
+    dest='isMaster', type=bool, default=False)
+args = parser.parse_args()
+args.peer_names = args.peer_names.split(',')
+
+proc.connectSend(args.pub_endpoint)
+proc.connectRecv(args.router_endpoint)
+
+#The state for the current process' RAFT_instance
+raft = RAFT_instance(args.node_name,args.peer_names,args.isMaster)
+#Dictionary which maps keys to values once they have been comitted
+data_store = {}
+
