@@ -6,8 +6,6 @@ import json
 from zmq.eventloop import ioloop, zmqstream
 ioloop.install()
 
-f = open('outfile.txt', 'w')
-
 #Class with all the state necessary for an instance of RAFT
 class RAFT_instance:
     def __init__(self,name,peers,isLeader):
@@ -46,6 +44,7 @@ class RAFT_instance:
 #Class which contains the necessary state for the process to connect over a socket
 class sock_state:
     def __init__(self):
+        self.logAll = True #Log all messages sent/recieved from the broker
         self.loop = ioloop.ZMQIOLoop.current()
         self.context = zmq.Context()
         #windows is weird and only has 2 signals...
@@ -83,18 +82,28 @@ class sock_state:
 
         if msg_json['type'] == 'hello':
             proc.send.send_json({'type': 'hello', 'source': raft.name})
-            proc.send.send_json({'type': 'log', 'debug': {'type': 'hello', 'source': raft.name} })
+            if self.logAll:
+                proc.send.send_json({'type': 'log', 'source' : raft.name, 'debug': 'debug'})
+        #Parse into a message object and send that to the general handle_message        
+        else:
+            (msg_type,msg) = parse_json(msg_json)
+            handle_message(msg_type,msg)
         return
 
     #Handles a protocol message delivered by the broker
     def handle_broker_message(self,msg_frames):
-        f.write("here\n")
-        f.close()
+        assert len(msg_frames) == 3
+        assert msg_frames[0] == raft.name
+        
+        msg_json = json.loads(msg_frames[2])
+
+        (msg_type,msg) = parse_json(msg_json)
+        handle_message(msg_type,msg)
         return
 
 #The class which contains the information relevent to append a new entry to the log
 class append_message:
-    def __init__(self,term, leader, prevLogIndex,prevLogTerm,log_entries,leaderCommit,sender,recpt):
+    def __init__(self,term, leader, prevLogIndex,prevLogTerm,log_entries,leaderCommit,sender,recpts):
         self.term = term #The term of the current leader
         self.leader = leader #The id of the current leader
         self.prevLogIndex = prevLogIndex #index of the log entry precieding "log_entries"
@@ -102,7 +111,13 @@ class append_message:
         self.entries = log_entries #entries to be appended to the log. See above for format
         self.leaderCommit = leaderCommit #The commit index of the leader
         self.sender = sender #Should be the leader.
-        self.recpt = recpt #Should be the same id as the process
+        self.recpts = recpts #Should be the same id as the process
+    def to_json(self):
+        return { 'type' : 'raft_append', 'term' : self.term, 'leader' : self.leader,
+                 'prevLogIndex' : self.prevLogIndex, 'prevLogTerm' : self.prevLogTerm,
+                 'entries' : self.entries, 'leaderCommit' : self.leaderCommit,
+                 'sender' : self.sender, 'destination' : self.recpts}
+    
 
 class appendReply_message:
     def __init__(self,term,prevLogIndex,log_len,status,msg_id,sender,recpt):
@@ -112,16 +127,24 @@ class appendReply_message:
         self.prevLogIndex = prevLogIndex #From the append message. Used to identify messages.
         self.log_len = log_len #The number of log entries which this message is accepting
         self.status = status #Either true or false for success or failure
+    def to_json(self):
+        return { 'type' : 'raft_appendReply', 'term' : self.term, 'prevLogIndex' : self.prevLogIndex,
+                 'log_long' : self.log_len, 'status' : self.status, 'destination' : [self.recpt],
+                 'sender' : self.sender }
 
 #Sent by a candidate to request a vote
 class requestVote_message:
-    def __init__(self,term,candidate,lastLogIndex,lastLogTerm,sender,recpt):
+    def __init__(self,term,candidate,lastLogIndex,lastLogTerm,sender,recpts):
         self.sender = sender
-        self.recpt = recpt
+        self.recpts = recpts
         self.term = term #The term of the candidate
         self.candidate = candidate #The id of the candidate requesting a vote
         self.lastLogIndex = lastLogIndex #The index of the candidates last log entry
         self.lastLogTerm = lastLogTerm #The term of the candidates last log entry
+    def to_json(self):
+        return { 'type' : 'raft_requestVote', 'term' : self.term, 'candidate' : self.candidate,
+                 'lastLogIndex' : self.lastLogIndex, 'lastLogTerm' : self.lastLogTerm,
+                 'destination' : self.recpts, 'sender' : self.sender }
 
 class replyVote_message:
     def __init__(self, term, voteGranted,sender,recpt):
@@ -129,6 +152,9 @@ class replyVote_message:
         self.recpt = recpt
         self.term = term #The term of the election request
         self.voteGranted = voteGranted #True or False if the vote was granted or not
+    def to_json(self):
+        return { 'type' : 'raft_replyVote', 'term' : self.term, 'voteGranted' : self.voteGranted,
+                 'sender' : self.sender, 'destination' : self.destination }
 
 #A message used for Byzantine generals message passing
 class byzantine_message:
@@ -139,10 +165,10 @@ class byzantine_message:
 
 #A message, probably sent by a user
 class transaction_message:
-    def __init__(self,key,val,action,sender,recpt):
+    def __init__(self,key,val,action,recpt):
+        self.action = action
         self.key = key
         self.val = val
-        self.sender = sender
         self.recpt = recpt
         return
 
@@ -153,13 +179,18 @@ class transaction_message:
     #READ - Given key was read and value is stored as 'value'
     #WRITE - Given key-val has been commited to the data-store
 class transactionReply_message:
-    def __init__(self,key,value,action,response,sender,recpt):
+    def __init__(self,key,value,action,response,sender):
         self.key = key
         self.value = value #Possibly a returned value
         self.action = action
         self.response = response #See above
         self.sender = sender
-        self.recpt = recpt
+    def to_json(self):
+        return {'type' : self.action + "Response",
+                'key' : self.key,
+                'value' : self.value,
+                'sender' : self.sender,
+                'response' : self.response }
 
 #Handles a transaction message (usually sent from a user)
 def handle_transaction(msg):
@@ -170,7 +201,7 @@ def handle_transaction(msg):
 
 #responds to an append message with the given status
 def append_response(msg,status):
-    res = appendReply(msg.term,msg.prevLogIndex,len(msg.log_entries),status,msg.recpt,msg.sender)
+    res = appendReply(msg.term,msg.prevLogIndex,len(msg.entries),status,msg.recpt,msg.sender)
     #Now send the message to the broker***
     return
 
@@ -188,7 +219,7 @@ def apply_log(msg):
     for i in range(msg.prevLogIndex,raft.lastApplied+1):
         raft.log.pop(i)
 
-    for log in msg.log_entries:
+    for log in msg.entries:
         raft.log.append(log)
     raft.lastApplied = len(raft.log)-1
 
@@ -209,8 +240,9 @@ def handle_append(msg):
     update_commit(msg) #Update commit index. Done even for hearbeat message
 
     #Heartbeat message
-    if len(msg.log_entries) == 0:
+    if len(msg.entries) == 0:
         append_response(msg, True)
+        return
     
     lastTerm = raft.log[msg.prevLogIndex][0] #Term of last commited entry
     #Log is inconsistent with respect to master
@@ -254,30 +286,38 @@ def handle_appendReply(msg):
         append_request(msg.sender)
         return
 
-#--The main message loop--
-#Before the loop begins, bind to the given socket
-#After entering the loop:
-#Read the message, parse it, and then respond to it
-#based upon the state of the process.
-def message_loop(sock):
-    proc.connect(sock)
-    while True:
-        msg = proc.read_message()
-        res = parse_message(msg)
-        if handle_message(res):
-            return
-
 #Parse the json message into a friendly python object
-def parse_message(msg):
-    return None
+def parse_json(msg_json):
+    if msg_json['type'] == 'get' or msg_json['type'] == 'set':
+        value = None
+        if 'value' in msg_json:
+            value = msg_json['value']
+        msg = transaction_message(msg_json['key'],value, msg_json['type'],raft.name)
+    elif msg_json['type'] == 'raft_append':
+        msg = append_message(msg_json['term'],msg_json['leader'],msg_json['prevLogIndex'],
+                             msg_json['prevLogTerm'],msg_json['entries'],msg_term['leaderCommit'],
+                             msg_json['sender'], [])
+    elif msg_json['type'] == 'raft_appendReply':
+        msg = appendReply_message(msg_json['term'],msg_json['prevLogIndex'],msg_json['log_len'],
+                                  msg_json['status'],msg_json['sender'],msg_json['recpt'])
+    elif msg_json['type'] == 'raft_requestVote':
+        msg = requestVote_message(msg_json['term'],msg_json['candidate'],msg_json['lastLogIndex'],
+                                  msg_json['lastLogTerm'],msg_json['sender'],[])
+    elif msg_json['type'] == 'raft_replyVote':
+        msg = requestVote_message(msg_json['term'],msg_json['voteGranted'],msg_json['sender'],
+                                  None)
+        
+    return ( msg_json['type'], msg)
 
 #Handle the message,
 #return True if the process should terminate
 #return False othermise
-def handle_message(res):
+def handle_message(msg_type,msg):
     return True
 
+#given a message object, send an object to the message broker
 def send_message(msg):
+    proc.send.send_json(msg.to_json())
     return
 
 
@@ -316,4 +356,4 @@ proc.connectSend(args.router_endpoint)
 #Dictionary which maps keys to values once they have been comitted
 data_store = {}
 
-proc.loop.start()
+#proc.loop.start()

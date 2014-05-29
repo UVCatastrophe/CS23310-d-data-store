@@ -186,7 +186,7 @@ class Broker:
     '''
     Print or log to a file the given message, along with sender.
     '''
-    # self.log_message(message)
+    self.log_message(message)
     return Message({'type': 'okay'})
 
   def make_handle_response(self, ty):
