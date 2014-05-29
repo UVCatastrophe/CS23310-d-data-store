@@ -1,0 +1,2 @@
+start test_node
+send {"destination": ["test"], "foo": "bar", "type": "foo"}

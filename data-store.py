@@ -1,7 +1,12 @@
 import zmq
 import argparse
+import sys
+import signal
+import json
 from zmq.eventloop import ioloop, zmqstream
 ioloop.install()
+
+f = open('outfile.txt', 'w')
 
 #Class with all the state necessary for an instance of RAFT
 class RAFT_instance:
@@ -41,8 +46,11 @@ class RAFT_instance:
 #Class which contains the necessary state for the process to connect over a socket
 class sock_state:
     def __init__(self):
-        self.loop = ioloop.ZMQIOLoop.current
+        self.loop = ioloop.ZMQIOLoop.current()
         self.context = zmq.Context()
+        #windows is weird and only has 2 signals...
+        for sig in [signal.SIGTERM, signal.SIGINT]:
+            signal.signal(sig, self.close_all)
         return
     #Connect to the socket sock which is used to send messages
     #and update the process's context/socket
@@ -50,21 +58,39 @@ class sock_state:
         self.socketSend = self.context.socket(zmq.REQ)
         self.socketSend.connect(sock)
         self.send = zmqstream.ZMQStream(self.socketSend,self.loop)
-        self.send.on_recv(handle)
+        self.send.on_recv(self.handle_broker_message)
     #Connect to the socket (sock) which is used to recieve messages from the broker
     def connectRecv(self,sock):
         self.socketRecv = self.context.socket(zmq.SUB)
         self.socketRecv.connect(sock)
-        self.socketRecv.set(zmq.SUBSCRIBE, self.name)
+        self.socketRecv.set(zmq.SUBSCRIBE, raft.name)
         self.recv = zmqstream.ZMQStream(self.socketRecv,self.loop)
-        self.recv.on_recv(handle_broker_message)
+        self.recv.on_recv(self.handle)
     #Closes send and recv sockets
     def close_all(self):
+        self.loop.stop()
         self.socketSend.close()
         self.socketRecv.close()
-    #Read the message from the (bound) socket and return the result
-    def read_message(self):
-        return self.socketRecv.recv()
+        f.close()
+        sys.exit(0)
+        #Handle a message recived on the send socket.
+    #This will be either raw messages from clients or the hello message from the broker
+    def handle(self,msg_frames):
+        assert len(msg_frames) == 3
+        assert msg_frames[0] == raft.name
+        
+        msg_json = json.loads(msg_frames[2])
+
+        if msg_json['type'] == 'hello':
+            proc.send.send_json({'type': 'hello', 'source': raft.name})
+            proc.send.send_json({'type': 'log', 'debug': {'type': 'hello', 'source': raft.name} })
+        return
+
+    #Handles a protocol message delivered by the broker
+    def handle_broker_message(self,msg_frames):
+        f.write("here\n")
+        f.close()
+        return
 
 #The class which contains the information relevent to append a new entry to the log
 class append_message:
@@ -203,14 +229,6 @@ def append_request(sender):
     #TODO: send the message to the message broker
     return
 
-#Handle a message recived on the send socket.
-#This will be either raw messages from clients or the hello message from the broker
-def handle(msg_frames):
-    return
-
-#Handles a protocol message delivered by the broker
-def handle_broker_message(msg_frames):
-    return
 
 #Handles the response to a append message sent by a leader to the a follower.
 #Either learns of its success and moves toward a quorum, or decrements
@@ -289,11 +307,13 @@ parser.add_argument('--test-isMaster',
 args = parser.parse_args()
 args.peer_names = args.peer_names.split(',')
 
-proc.connectSend(args.pub_endpoint)
-proc.connectRecv(args.router_endpoint)
-
 #The state for the current process' RAFT_instance
 raft = RAFT_instance(args.node_name,args.peer_names,args.isMaster)
+
+proc.connectRecv(args.pub_endpoint)
+proc.connectSend(args.router_endpoint)
+
 #Dictionary which maps keys to values once they have been comitted
 data_store = {}
 
+proc.loop.start()

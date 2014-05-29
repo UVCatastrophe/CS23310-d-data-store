@@ -33,7 +33,7 @@ class Node:
 
     self.store = {'foo': 'bar'}
 
-    for sig in [signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT]:
+    for sig in [signal.SIGTERM, signal.SIGINT]:
       signal.signal(sig, self.shutdown)
 
   def start(self):
