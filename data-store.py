@@ -70,7 +70,6 @@ class sock_state:
         self.loop.stop()
         self.socketSend.close()
         self.socketRecv.close()
-        f.close()
         sys.exit(0)
         #Handle a message recived on the send socket.
     #This will be either raw messages from clients or the hello message from the broker
@@ -83,27 +82,26 @@ class sock_state:
         if msg_json['type'] == 'hello':
             proc.send.send_json({'type': 'hello', 'source': raft.name})
             if self.logAll:
-                f.write("logging hello\n")
+                print "logging hello\n"
                 proc.send.send_json({'type': 'log', 'source' : raft.name, 'debug': 'hello recieved'})
             return
         
-        if msg_json['type'] == "debug_makeLeader":
+        elif msg_json['type'] == "debug_makeLeader":
              raft.isLeader = True
              if self.logAll:
-                 f.write("logging makeLeader\n")
+                 print "logging makeLeader\n"
                  proc.send.send_json({'type': 'log', 'source' : raft.name, 'debug': raft.name + " made leader"})
              return   
         #Parse into a message object and send that to the general handle_message
 
-        if msg_json['type'] == 'debug_stop':
-            f.write('debug_stop')
-            f.close()
+        elif msg_json['type'] == 'debug_stop':
+            print "debug stop"
+            return
             
         else:
             if self.logAll:
-                proc.send.send_json({'type' : 'log', 'debug' : msg_json})
-                f.write('recieved ' + str(msg_json))
-                f.close()
+                print "recieved message"
+                #proc.send.send_json({'type' : 'log', 'debug' : msg_json })
             (msg_type,msg) = parse_json(msg_json)
             handle_message(msg_type,msg)
         return
@@ -378,7 +376,5 @@ proc.connectSend(args.router_endpoint)
 
 #Dictionary which maps keys to values once they have been comitted
 data_store = {}
-f = open(raft.name + 'Out.txt', 'w')
-
-f.write('entering loop\n')
 proc.loop.start()
+

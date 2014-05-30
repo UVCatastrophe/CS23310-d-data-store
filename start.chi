@@ -1,4 +1,3 @@
 start test
-send {"destination": ["test"], "type" : "debug_makeLeader" }
-send {"destination": ["test"], "type" : "set", "key" : "foo"}
-send {"destination": ["test"], "type" : "debug_stop" }
+send {"destination": ["test"], "type" : "debug_makeLeader"}
+set test foo
