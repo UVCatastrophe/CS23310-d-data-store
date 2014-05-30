@@ -83,9 +83,27 @@ class sock_state:
         if msg_json['type'] == 'hello':
             proc.send.send_json({'type': 'hello', 'source': raft.name})
             if self.logAll:
-                proc.send.send_json({'type': 'log', 'source' : raft.name, 'debug': 'debug'})
-        #Parse into a message object and send that to the general handle_message        
+                f.write("logging hello\n")
+                proc.send.send_json({'type': 'log', 'source' : raft.name, 'debug': 'hello recieved'})
+            return
+        
+        if msg_json['type'] == "debug_makeLeader":
+             raft.isLeader = True
+             if self.logAll:
+                 f.write("logging makeLeader\n")
+                 proc.send.send_json({'type': 'log', 'source' : raft.name, 'debug': raft.name + " made leader"})
+             return   
+        #Parse into a message object and send that to the general handle_message
+
+        if msg_json['type'] == 'debug_stop':
+            f.write('debug_stop')
+            f.close()
+            
         else:
+            if self.logAll:
+                proc.send.send_json({'type' : 'log', 'debug' : msg_json})
+                f.write('recieved ' + str(msg_json))
+                f.close()
             (msg_type,msg) = parse_json(msg_json)
             handle_message(msg_type,msg)
         return
@@ -210,6 +228,11 @@ def append_response(msg,status):
 def update_commit(msg):
     if msg.leaderCommit > raft.commitIndex:
         raft.commitIndex = min(msg.leaderCommit, msg.prevLogIndex)
+        for log in range(msg.prevLogIndex,raft.commitIndex):
+            #Update the value of the data-store to the most recent one
+            if log[1] == "get":
+                #data_store[key] = val
+                data_store[log[2]] = log[3]
     return
 
 #Apply the given logs (in the append message)
@@ -355,5 +378,7 @@ proc.connectSend(args.router_endpoint)
 
 #Dictionary which maps keys to values once they have been comitted
 data_store = {}
+f = open(raft.name + 'Out.txt', 'w')
 
-#proc.loop.start()
+f.write('entering loop\n')
+proc.loop.start()

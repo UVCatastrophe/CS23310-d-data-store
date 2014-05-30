@@ -1,2 +1,4 @@
-start test_node
-send {"destination": ["test"], "foo": "bar", "type": "foo"}
+start test
+send {"destination": ["test"], "type" : "debug_makeLeader" }
+send {"destination": ["test"], "type" : "set", "key" : "foo"}
+send {"destination": ["test"], "type" : "debug_stop" }
