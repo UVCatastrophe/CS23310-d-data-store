@@ -1,3 +1,3 @@
 start test
-send {"destination": ["test"], "type" : "debug_makeLeader"}
-set test foo
+send {"destination": ["test"], "type" : "debug_setLeader"}
+get test foo

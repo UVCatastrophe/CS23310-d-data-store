@@ -5,7 +5,6 @@ import subprocess
 import os
 import zmq
 import random
-import sys
 from zmq.eventloop import ioloop, zmqstream
 ioloop.install()
 
@@ -498,7 +497,7 @@ class Broker:
     if not hasattr(self, "devnull"):
       self.devnull = open(os.devnull, "w")
 
-    proc = subprocess.Popen(args, shell=True, stdout=self.devnull)
+    proc = subprocess.Popen(args, shell=True, stdout=self.devnull, stderr=self.devnull)
     self.node_pids[command['name']] = proc
 
     self.script_conditions.add('helloResponse')
