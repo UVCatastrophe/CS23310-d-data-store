@@ -30,16 +30,27 @@ class RAFT_instance:
         self.matchIndex = {} #index of the highest log enty which has been replicated on each server
 
         #Initialize for each peer
+        self.numPeers = 0
         for peer in peers:
+            if peer == name:
+                continue
+            self.numPeers += 1
             self.nextIndex[peer] = 0
             self.matchIndex[peer] = 0
 
     #Updates a LEADER's commit index to the lowest value in matchIndex
     def update_commitIndex(self):
-        mn = self.matchIndex[0]
-        for i in self.matchIndex:
-            mn = min(mn, i)
-        self.commitIndex = mn
+        coutns = []
+        for peer in self.matchIndex:
+            i = self.matchIndex[peer]
+            counts.append[i]
+        counts.sort()
+        oldCommit = self.commitIndex
+        if len(counts) % 2 == 0:
+            self.commitIndex = counts[len(counts)/2 -1]
+        else:
+            self.commitIndex = counts[len(counts)/2]
+        return oldCommit
 
 #Class which contains the necessary state for the process to connect over a socket
 class sock_state:
@@ -66,7 +77,7 @@ class sock_state:
         self.recv = zmqstream.ZMQStream(self.socketRecv,self.loop)
         self.recv.on_recv(self.handle)
     #Closes send and recv sockets
-    def close_all(self):
+    def close_all(self,b,c):
         self.loop.stop()
         self.socketSend.close()
         self.socketRecv.close()
@@ -74,9 +85,7 @@ class sock_state:
         #Handle a message recived on the send socket.
     #This will be either raw messages from clients or the hello message from the broker
     def handle(self,msg_frames):
-        assert len(msg_frames) == 3
-        assert msg_frames[0] == raft.name
-        
+
         msg_json = json.loads(msg_frames[2])
 
         if msg_json['type'] == 'hello':
@@ -86,7 +95,7 @@ class sock_state:
                 proc.send.send_json({'type': 'log', 'source' : raft.name, 'debug': 'hello recieved'})
             return
         
-        elif msg_json['type'] == "debug_makeLeader":
+        elif msg_json['type'] == "debug_setLeader":
              raft.isLeader = True
              if self.logAll:
                  print "logging makeLeader\n"
@@ -108,10 +117,9 @@ class sock_state:
 
     #Handles a protocol message delivered by the broker
     def handle_broker_message(self,msg_frames):
-        assert len(msg_frames) == 3
-        assert msg_frames[0] == raft.name
-        
-        msg_json = json.loads(msg_frames[2])
+        msg_json = json.loads(msg_frames[0])
+        if 'source' in msg_json and msg_json['source'] == raft.name:
+            return #from you. Not for you.
 
         (msg_type,msg) = parse_json(msg_json)
         handle_message(msg_type,msg)
@@ -181,12 +189,15 @@ class byzantine_message:
 
 #A message, probably sent by a user
 class transaction_message:
-    def __init__(self,key,val,action,recpt):
+    def __init__(self,key,value,action,recpt):
         self.action = action
         self.key = key
-        self.val = val
+        self.value = value
         self.recpt = recpt
         return
+    def to_json(self):
+        return { 'type' : self.action, 'key': self.key, 'value': self.value,
+                 'recpt' : self.recpt }
 
 #Responses:
     #BAD_KEY - No such key to be read in the datastore
@@ -298,7 +309,10 @@ def handle_appendReply(msg):
         m = max(l, msg.prevLogIndex + msg.num_logs,raft.matchIndex[msg.sender])
         raft.matchIndex[msg.sender] = m
         raft.nextIndex[msg.sender] = m+1
-        raft.update_CommitIndex()
+        last = raft.update_CommitIndex()
+        #Update the datastore, send out set/get response messages for the newly updated commit indes
+        transaction_reply(last)
+                    
     else:
         if raft.matchIndex[msg.sender] > msg.prevLogIndex:
             #stale message
@@ -307,8 +321,22 @@ def handle_appendReply(msg):
         append_request(msg.sender)
         return
 
+#Sends replies to the broker for each transaction starting at last and going to committedIndex
+def transaction_reply(last):
+    for i in range(last,raft.commitIndex):
+        (term,opp,key,value) = raft.log[i]
+        if opp == "set":
+            data_store[key] = value
+            send_message(transactionReply_message(key,value,opp,"SUCCESS",raft.name))
+        elif opp == 'get':
+            if key in data_store:
+                send_message(transactionReply_message(key,data_store[key],opp,"SUCCESS",raft.name))
+            else:
+                send_message(transactionReply_message(key,value,opp,"FAILURE",raft.name))
+
 #Parse the json message into a friendly python object
 def parse_json(msg_json):
+    msg = None
     if msg_json['type'] == 'get' or msg_json['type'] == 'set':
         value = None
         if 'value' in msg_json:
@@ -330,17 +358,52 @@ def parse_json(msg_json):
         
     return ( msg_json['type'], msg)
 
+#Handles a request to set to a value
+def handle_get_set(msg):
+    if not raft.isLeader:
+        #Maybe redirect to leader? Just ignore for now
+        return
+
+    raft.log.append( (raft.currentTerm, msg.action, msg.key,msg.value) )
+    raft.lastApplied += 1
+
+    for peer in raft.nextIndex:
+        printf(str(peer))
+        nextIndex = raft.nextIndex[peer]
+        prevTerm = raft.log[nextIndex][0]
+        log_send = raft.log[nextIndex:]
+        app = append_message(raft.currentTerm,raft.name,raft.nextIndex[peer],
+                             prevTerm, log_send, raft.commitIndex, raft.name,[peer])
+        send_message(msg)
+
+    #Just the leader case. Useful for testing...
+    if raft.numPeers == 0:
+        printf("zero peer case\n")
+        if msg.action == "set":
+            data_store[msg.key] = msg.value
+            
+        raft.commitIndex = raft.lastApplied
+        transaction_reply(raft.commitIndex-1)    
+
 #Handle the message,
 #return True if the process should terminate
 #return False othermise
 def handle_message(msg_type,msg):
+    if msg_type == "set" or msg_type == "get":
+        handle_get_set(msg)
     return True
 
 #given a message object, send an object to the message broker
 def send_message(msg):
+    if proc.logAll:
+        proc.send.send_json({ 'type' : 'log', 'debug' : msg.to_json()})
     proc.send.send_json(msg.to_json())
     return
 
+def printf(s):
+    f = open("out.txt", "a")
+    f.write(s)
+    f.close()
 
 #--------------------Initialization-------------------------------
 #The state for the currect process' sockets
@@ -375,6 +438,7 @@ proc.connectRecv(args.pub_endpoint)
 proc.connectSend(args.router_endpoint)
 
 #Dictionary which maps keys to values once they have been comitted
-data_store = {}
-proc.loop.start()
 
+data_store = {}
+
+proc.loop.start()
