@@ -49,10 +49,10 @@ class RAFT_instance:
 
     #Updates a LEADER's commit index to the lowest value in matchIndex
     def update_commitIndex(self):
-        coutns = []
+        counts = []
         for peer in self.matchIndex:
             i = self.matchIndex[peer]
-            counts.append[i]
+            counts.append(i)
         counts.sort()
         oldCommit = self.commitIndex
         if len(counts) % 2 == 0:
@@ -330,10 +330,11 @@ def handle_appendReply(msg):
         print "Error: Follower " + str(msg.sender) + " is responding to the wrong master, or has the wrong term number"
         return
     if msg.status:#An accepting message
-        m = max(l, msg.prevLogIndex + msg.num_logs,raft.matchIndex[msg.sender])
+        
+        m = max(msg.prevLogIndex + msg.log_len,raft.matchIndex[msg.sender])
         raft.matchIndex[msg.sender] = m
         raft.nextIndex[msg.sender] = m+1
-        last = raft.update_CommitIndex()
+        last = raft.update_commitIndex()
         #Update the datastore, send out set/get response messages for the newly updated commit indes
         transaction_reply(last)
                     
@@ -371,13 +372,13 @@ def parse_json(msg_json):
     elif msg_json['type'] == 'raft_append':
         msg = append_message(msg_json['term'],msg_json['leader'],msg_json['prevLogIndex'],
                              msg_json['prevLogTerm'],msg_json['entries'],msg_json['leaderCommit'],
-                             msg_json['sender'], [])
+                             msg_json['sender'], msg_json['destination'][0])
     elif msg_json['type'] == 'raft_appendReply':
         msg = appendReply_message(msg_json['term'],msg_json['prevLogIndex'],msg_json['log_len'],
                                   msg_json['status'],msg_json['sender'],raft.name)
     elif msg_json['type'] == 'raft_requestVote':
         msg = requestVote_message(msg_json['term'],msg_json['candidate'],msg_json['lastLogIndex'],
-                                  msg_json['lastLogTerm'],msg_json['sender'],[])
+                                  msg_json['lastLogTerm'],msg_json['sender'],msg_json['destination'][0])
     elif msg_json['type'] == 'raft_replyVote':
         msg = requestVote_message(msg_json['term'],msg_json['voteGranted'],msg_json['sender'],
                                   None)
@@ -423,6 +424,8 @@ def handle_message(msg_type,msg):
         handle_get_set(msg)
     if msg_type == "raft_append":
         handle_append(msg)
+    if msg_type == "raft_appendReply":
+        handle_appendReply(msg)
     if msg_type == "okay":
         return
     return True

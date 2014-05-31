@@ -1,3 +1,4 @@
 start test --peer-names test2 --start-leader test
 start test2 --peer-names test --start-leader test
 set test foo
+get test
