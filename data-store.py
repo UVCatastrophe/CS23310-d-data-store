@@ -8,22 +8,31 @@ ioloop.install()
 
 #Class with all the state necessary for an instance of RAFT
 class RAFT_instance:
-    def __init__(self,name,peers,isLeader):
+    def __init__(self,name,peers,start_leader=""):
         self.currentTerm = 0 #The latest term the server has seen (monotonicly increasing)
         self.votedFor = None #The id of the last candidate vvoted for
-        self.log = [] #A list of log entries 4-tuple (term,command,key,value)
 
+        #A list of log entries 4-tuple (term,command,key,value)
+        #Initialized with one entry for purposes of our implementation
+        self.log = [(self.currentTerm,"start","startKey",0)]
+        
         self.commitIndex = 0#Index into the log of the highest log entry that has been commited
         self.lastApplied = 0#the index of the highest log entry applied
 
         self.name = name #The name of the current node
 
-        self.leader = 0 #Best guess at the current leader...
+        #Best guess at the current leader...
+        self.leader = start_leader
+        
         #All process begin in "follower" mode in a normal execution.
         #Variable is used for testing.
-        self.isLeader = isLeader 
+        if start_leader == self.name:
+            self.isLeader = True
+        else:
+            self.isLeader = False
 
         #--State used when the process is a leader--
+        self.idQueue = [] #The id of a get/set message. Attached to a get/set response
 
         #Both are ditionaries which map peer-name to a numeric value
         self.nextIndex = {} #index of the next log entry to send to each server
@@ -32,7 +41,7 @@ class RAFT_instance:
         #Initialize for each peer
         self.numPeers = 0
         for peer in peers:
-            if peer == name:
+            if peer == name or peer == "":
                 continue
             self.numPeers += 1
             self.nextIndex[peer] = 0
@@ -58,6 +67,7 @@ class sock_state:
         self.logAll = True #Log all messages sent/recieved from the broker
         self.loop = ioloop.ZMQIOLoop.current()
         self.context = zmq.Context()
+        self.isConnected = False #Changed after recieving a hello message
         #windows is weird and only has 2 signals...
         for sig in [signal.SIGTERM, signal.SIGINT]:
             signal.signal(sig, self.close_all)
@@ -86,19 +96,25 @@ class sock_state:
     #This will be either raw messages from clients or the hello message from the broker
     def handle(self,msg_frames):
 
+        if not msg_frames[0] == raft.name:
+            return #Not for you
+        
         msg_json = json.loads(msg_frames[2])
 
         if msg_json['type'] == 'hello':
+            if self.isConnected:
+                return
+            else:
+                self.isConnected = True
+            
             proc.send.send_json({'type': 'hello', 'source': raft.name})
             if self.logAll:
-                print "logging hello\n"
                 proc.send.send_json({'type': 'log', 'source' : raft.name, 'debug': 'hello recieved'})
             return
         
         elif msg_json['type'] == "debug_setLeader":
              raft.isLeader = True
              if self.logAll:
-                 print "logging makeLeader\n"
                  proc.send.send_json({'type': 'log', 'source' : raft.name, 'debug': raft.name + " made leader"})
              return   
         #Parse into a message object and send that to the general handle_message
@@ -108,6 +124,10 @@ class sock_state:
             return
             
         else:
+            if 'destination' in msg_json and (not raft.name in msg_json['destination']):
+                print "message dropped"
+                return
+            
             if self.logAll:
                 print "recieved message"
                 #proc.send.send_json({'type' : 'log', 'debug' : msg_json })
@@ -121,13 +141,14 @@ class sock_state:
         if 'source' in msg_json and msg_json['source'] == raft.name:
             return #from you. Not for you.
 
+
         (msg_type,msg) = parse_json(msg_json)
         handle_message(msg_type,msg)
         return
 
 #The class which contains the information relevent to append a new entry to the log
 class append_message:
-    def __init__(self,term, leader, prevLogIndex,prevLogTerm,log_entries,leaderCommit,sender,recpts):
+    def __init__(self,term, leader, prevLogIndex,prevLogTerm,log_entries,leaderCommit,sender,recpt):
         self.term = term #The term of the current leader
         self.leader = leader #The id of the current leader
         self.prevLogIndex = prevLogIndex #index of the log entry precieding "log_entries"
@@ -135,16 +156,16 @@ class append_message:
         self.entries = log_entries #entries to be appended to the log. See above for format
         self.leaderCommit = leaderCommit #The commit index of the leader
         self.sender = sender #Should be the leader.
-        self.recpts = recpts #Should be the same id as the process
+        self.recpt = recpt #Should be the same id as the process
     def to_json(self):
         return { 'type' : 'raft_append', 'term' : self.term, 'leader' : self.leader,
                  'prevLogIndex' : self.prevLogIndex, 'prevLogTerm' : self.prevLogTerm,
                  'entries' : self.entries, 'leaderCommit' : self.leaderCommit,
-                 'sender' : self.sender, 'destination' : self.recpts}
+                 'sender' : self.sender, 'destination' : [self.recpt]}
     
 
 class appendReply_message:
-    def __init__(self,term,prevLogIndex,log_len,status,msg_id,sender,recpt):
+    def __init__(self,term,prevLogIndex,log_len,status,sender,recpt):
         self.sender = sender
         self.recpt = recpt
         self.term = term
@@ -153,7 +174,7 @@ class appendReply_message:
         self.status = status #Either true or false for success or failure
     def to_json(self):
         return { 'type' : 'raft_appendReply', 'term' : self.term, 'prevLogIndex' : self.prevLogIndex,
-                 'log_long' : self.log_len, 'status' : self.status, 'destination' : [self.recpt],
+                 'log_len' : self.log_len, 'status' : self.status, 'destination' : [self.recpt],
                  'sender' : self.sender }
 
 #Sent by a candidate to request a vote
@@ -189,15 +210,16 @@ class byzantine_message:
 
 #A message, probably sent by a user
 class transaction_message:
-    def __init__(self,key,value,action,recpt):
+    def __init__(self,key,value,action,recpt,msg_id):
         self.action = action
         self.key = key
         self.value = value
         self.recpt = recpt
+        self.msg_id = msg_id
         return
     def to_json(self):
         return { 'type' : self.action, 'key': self.key, 'value': self.value,
-                 'recpt' : self.recpt }
+                 'destination' : [self.recpt], "id" : self.msg_id }
 
 #Responses:
     #BAD_KEY - No such key to be read in the datastore
@@ -206,18 +228,20 @@ class transaction_message:
     #READ - Given key was read and value is stored as 'value'
     #WRITE - Given key-val has been commited to the data-store
 class transactionReply_message:
-    def __init__(self,key,value,action,response,sender):
+    def __init__(self,key,value,action,response,sender,msg_id):
         self.key = key
         self.value = value #Possibly a returned value
         self.action = action
         self.response = response #See above
         self.sender = sender
+        self.msg_id = msg_id
     def to_json(self):
         return {'type' : self.action + "Response",
                 'key' : self.key,
                 'value' : self.value,
                 'sender' : self.sender,
-                'response' : self.response }
+                'response' : self.response,
+                'id' : self.msg_id}
 
 #Handles a transaction message (usually sent from a user)
 def handle_transaction(msg):
@@ -228,8 +252,8 @@ def handle_transaction(msg):
 
 #responds to an append message with the given status
 def append_response(msg,status):
-    res = appendReply(msg.term,msg.prevLogIndex,len(msg.entries),status,msg.recpt,msg.sender)
-    #Now send the message to the broker***
+    res = appendReply_message(msg.term,msg.prevLogIndex,len(msg.entries),status,msg.recpt,msg.sender)
+    send_message(res)
     return
 
 #Update the 'commited' index of the current raft instance
@@ -265,7 +289,7 @@ def handle_append(msg):
     if msg.term < raft.currentTerm:
         return #Message that is necessarily out of date. Should reject.
 
-    if raft.isMaster:
+    if raft.isLeader:
         print "Error, two masters operating with the same term number"
         return
     
@@ -281,7 +305,7 @@ def handle_append(msg):
     if not(lastTerm == msg.prevLogTerm):
         append_response(msg,False)
     else:
-        apply_logs(msg)
+        apply_log(msg)
         append_response(msg,True)
 
 #constructs and then sends an append request to the given sender
@@ -326,13 +350,15 @@ def transaction_reply(last):
     for i in range(last,raft.commitIndex):
         (term,opp,key,value) = raft.log[i]
         if opp == "set":
+            msg_id = raft.idQueue.pop(0)
             data_store[key] = value
-            send_message(transactionReply_message(key,value,opp,"SUCCESS",raft.name))
+            send_message(transactionReply_message(key,value,opp,"SUCCESS",raft.name,msg_id))
         elif opp == 'get':
+            msg_id = raft.idQueue.pop(0)
             if key in data_store:
-                send_message(transactionReply_message(key,data_store[key],opp,"SUCCESS",raft.name))
+                send_message(transactionReply_message(key,data_store[key],opp,"SUCCESS",raft.name,msg_id))
             else:
-                send_message(transactionReply_message(key,value,opp,"FAILURE",raft.name))
+                send_message(transactionReply_message(key,value,opp,"FAILURE",raft.name,msg_id))
 
 #Parse the json message into a friendly python object
 def parse_json(msg_json):
@@ -341,14 +367,14 @@ def parse_json(msg_json):
         value = None
         if 'value' in msg_json:
             value = msg_json['value']
-        msg = transaction_message(msg_json['key'],value, msg_json['type'],raft.name)
+        msg = transaction_message(msg_json['key'],value, msg_json['type'],raft.name,msg_json['id'])
     elif msg_json['type'] == 'raft_append':
         msg = append_message(msg_json['term'],msg_json['leader'],msg_json['prevLogIndex'],
-                             msg_json['prevLogTerm'],msg_json['entries'],msg_term['leaderCommit'],
+                             msg_json['prevLogTerm'],msg_json['entries'],msg_json['leaderCommit'],
                              msg_json['sender'], [])
     elif msg_json['type'] == 'raft_appendReply':
         msg = appendReply_message(msg_json['term'],msg_json['prevLogIndex'],msg_json['log_len'],
-                                  msg_json['status'],msg_json['sender'],msg_json['recpt'])
+                                  msg_json['status'],msg_json['sender'],raft.name)
     elif msg_json['type'] == 'raft_requestVote':
         msg = requestVote_message(msg_json['term'],msg_json['candidate'],msg_json['lastLogIndex'],
                                   msg_json['lastLogTerm'],msg_json['sender'],[])
@@ -361,24 +387,27 @@ def parse_json(msg_json):
 #Handles a request to set to a value
 def handle_get_set(msg):
     if not raft.isLeader:
-        #Maybe redirect to leader? Just ignore for now
+        #Redirect to the leader
+        msg.recpt = raft.leader
+        send_message(msg)
         return
 
+    raft.idQueue.append(msg.msg_id)
     raft.log.append( (raft.currentTerm, msg.action, msg.key,msg.value) )
     raft.lastApplied += 1
 
     for peer in raft.nextIndex:
-        printf(str(peer))
         nextIndex = raft.nextIndex[peer]
         prevTerm = raft.log[nextIndex][0]
         log_send = raft.log[nextIndex:]
         app = append_message(raft.currentTerm,raft.name,raft.nextIndex[peer],
-                             prevTerm, log_send, raft.commitIndex, raft.name,[peer])
-        send_message(msg)
+                             prevTerm, log_send, raft.commitIndex, raft.name,peer)
+        print "Sending append_message to " + peer
+        send_message(app)
 
     #Just the leader case. Useful for testing...
     if raft.numPeers == 0:
-        printf("zero peer case\n")
+        print "zero peer case"
         if msg.action == "set":
             data_store[msg.key] = msg.value
             
@@ -389,8 +418,13 @@ def handle_get_set(msg):
 #return True if the process should terminate
 #return False othermise
 def handle_message(msg_type,msg):
+    print raft.name + ": handling msg of type " + msg_type 
     if msg_type == "set" or msg_type == "get":
         handle_get_set(msg)
+    if msg_type == "raft_append":
+        handle_append(msg)
+    if msg_type == "okay":
+        return
     return True
 
 #given a message object, send an object to the message broker
@@ -426,13 +460,13 @@ parser.add_argument('--peer-names',
   dest='peer_names', type=str,
   default='')
 #Used to skip master election for testing.
-parser.add_argument('--test-isMaster',
-    dest='isMaster', type=bool, default=False)
+parser.add_argument('--start-leader',
+    dest='start_leader', type=str, default="")
 args = parser.parse_args()
 args.peer_names = args.peer_names.split(',')
 
 #The state for the current process' RAFT_instance
-raft = RAFT_instance(args.node_name,args.peer_names,args.isMaster)
+raft = RAFT_instance(args.node_name,args.peer_names,start_leader=args.start_leader)
 
 proc.connectRecv(args.pub_endpoint)
 proc.connectSend(args.router_endpoint)
