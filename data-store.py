@@ -33,6 +33,7 @@ class RAFT_instance:
 
         #--State used when the process is a leader--
         self.idQueue = [] #The id of a get/set message. Attached to a get/set response
+        self.senderQueue = [] #Parallel to the id queue. None if sent by the system. Otherwise contains the name of the node which forwarded the message.
 
         #Both are ditionaries which map peer-name to a numeric value
         self.nextIndex = {} #index of the next log entry to send to each server
@@ -44,7 +45,7 @@ class RAFT_instance:
             if peer == name or peer == "":
                 continue
             self.numPeers += 1
-            self.nextIndex[peer] = 0
+            self.nextIndex[peer] = 1
             self.matchIndex[peer] = 0
 
     #Updates a LEADER's commit index to the lowest value in matchIndex
@@ -116,7 +117,12 @@ class sock_state:
              raft.isLeader = True
              if self.logAll:
                  proc.send.send_json({'type': 'log', 'source' : raft.name, 'debug': raft.name + " made leader"})
-             return   
+             return
+
+        #Asked to forward the message body back to the message broker
+        elif msg_json['type'] == "transaction_forward":
+            self.send.send_json(msg_json['body'])
+            return
         #Parse into a message object and send that to the general handle_message
 
         elif msg_json['type'] == 'debug_stop':
@@ -140,6 +146,7 @@ class sock_state:
         msg_json = json.loads(msg_frames[0])
         if 'source' in msg_json and msg_json['source'] == raft.name:
             return #from you. Not for you.
+
 
 
         (msg_type,msg) = parse_json(msg_json)
@@ -210,16 +217,18 @@ class byzantine_message:
 
 #A message, probably sent by a user
 class transaction_message:
-    def __init__(self,key,value,action,recpt,msg_id):
+    def __init__(self,key,value,action,recpt,msg_id,sender):
         self.action = action
         self.key = key
         self.value = value
         self.recpt = recpt
         self.msg_id = msg_id
+        #Sender is None if it came directly from a client, has a value if it is forwarded from a client
+        self.sender = sender  
         return
     def to_json(self):
         return { 'type' : self.action, 'key': self.key, 'value': self.value,
-                 'destination' : [self.recpt], "id" : self.msg_id }
+                 'destination' : [self.recpt], "id" : self.msg_id, 'sender' : self.sender }
 
 #Responses:
     #BAD_KEY - No such key to be read in the datastore
@@ -272,7 +281,7 @@ def update_commit(msg):
 # to the current log for this instance
 def apply_log(msg):
     #Remove any uncommited entries that conflict
-    for i in range(msg.prevLogIndex,raft.lastApplied+1):
+    for i in range(msg.prevLogIndex+1,raft.lastApplied+1):
         raft.log.pop(i)
 
     for log in msg.entries:
@@ -299,7 +308,8 @@ def handle_append(msg):
     if len(msg.entries) == 0:
         append_response(msg, True)
         return
-    
+
+    print "Offending Index: " + str(msg.prevLogIndex)
     lastTerm = raft.log[msg.prevLogIndex][0] #Term of last commited entry
     #Log is inconsistent with respect to master
     if not(lastTerm == msg.prevLogTerm):
@@ -307,15 +317,6 @@ def handle_append(msg):
     else:
         apply_log(msg)
         append_response(msg,True)
-
-#constructs and then sends an append request to the given sender
-def append_request(sender):
-    prevIndex = raft.matchIndex[sender]
-    prevTerm = raft.log[prevIndex][0]
-    msg = append_message(raft.currentTerm,raft.name,prevIndex,prevTerm,\
-                         raft.commitIndex,raft.name,sender)
-    #TODO: send the message to the message broker
-    return
 
 
 #Handles the response to a append message sent by a leader to the a follower.
@@ -329,46 +330,63 @@ def handle_appendReply(msg):
     if msg.term > raft.currentTerm:
         print "Error: Follower " + str(msg.sender) + " is responding to the wrong master, or has the wrong term number"
         return
+    
     if msg.status:#An accepting message
-        
         m = max(msg.prevLogIndex + msg.log_len,raft.matchIndex[msg.sender])
         raft.matchIndex[msg.sender] = m
         raft.nextIndex[msg.sender] = m+1
         last = raft.update_commitIndex()
+        print "LAST :::::: " + str(last)
         #Update the datastore, send out set/get response messages for the newly updated commit indes
         transaction_reply(last)
-                    
+        return
     else:
         if raft.matchIndex[msg.sender] > msg.prevLogIndex:
             #stale message
             return
-        raft.nextIndex[msg.sender] = min(msg.prevLogIndex-1,raft.nextInsex[msg.sender])
+        raft.nextIndex[msg.sender] = min(msg.prevLogIndex-1,raft.nextIndex[msg.sender])
         append_request(msg.sender)
         return
 
 #Sends replies to the broker for each transaction starting at last and going to committedIndex
 def transaction_reply(last):
-    for i in range(last,raft.commitIndex):
+    for i in range(last+1,raft.commitIndex+1):
         (term,opp,key,value) = raft.log[i]
         if opp == "set":
             msg_id = raft.idQueue.pop(0)
+            fwd = raft.senderQueue.pop(0)
             data_store[key] = value
-            send_message(transactionReply_message(key,value,opp,"SUCCESS",raft.name,msg_id))
+            if fwd == None:
+                send_message(transactionReply_message(key,value,opp,"SUCCESS",raft.name,msg_id))
+            else:
+                body = transactionReply_message(key,value,opp,"SUCCESS",raft.name,msg_id).to_json()
+                proc.send.send_json( { 'type' : "transaction_forward", 'destination' : [fwd], 'body' : body })
         elif opp == 'get':
             msg_id = raft.idQueue.pop(0)
+            fwd = raft.senderQueue.pop(0)
             if key in data_store:
-                send_message(transactionReply_message(key,data_store[key],opp,"SUCCESS",raft.name,msg_id))
+                res = "SUCCESS"
             else:
-                send_message(transactionReply_message(key,value,opp,"FAILURE",raft.name,msg_id))
+                res = "FAILURE"
+            rply = transactionReply_message(key,data_store[key],opp,res,raft.name,msg_id)
 
+            if fwd == None:
+                send_message(rply)
+            else:
+                body = rply.to_json()
+                proc.send.send_json( { 'type' : "transaction_forward", 'destination' : [fwd], 'body' : body })
+                
 #Parse the json message into a friendly python object
 def parse_json(msg_json):
     msg = None
     if msg_json['type'] == 'get' or msg_json['type'] == 'set':
         value = None
+        sender = None
         if 'value' in msg_json:
             value = msg_json['value']
-        msg = transaction_message(msg_json['key'],value, msg_json['type'],raft.name,msg_json['id'])
+        if 'sender' in msg_json:
+            sender = msg_json['sender']
+        msg = transaction_message(msg_json['key'],value, msg_json['type'],raft.name,msg_json['id'],sender)
     elif msg_json['type'] == 'raft_append':
         msg = append_message(msg_json['term'],msg_json['leader'],msg_json['prevLogIndex'],
                              msg_json['prevLogTerm'],msg_json['entries'],msg_json['leaderCommit'],
@@ -390,18 +408,22 @@ def handle_get_set(msg):
     if not raft.isLeader:
         #Redirect to the leader
         msg.recpt = raft.leader
+        msg.sender = raft.name
         send_message(msg)
         return
 
     raft.idQueue.append(msg.msg_id)
+    print "MSG SENDER : " + str(msg.sender)
+    raft.senderQueue.append(msg.sender)
+    
     raft.log.append( (raft.currentTerm, msg.action, msg.key,msg.value) )
     raft.lastApplied += 1
 
     for peer in raft.nextIndex:
-        nextIndex = raft.nextIndex[peer]
-        prevTerm = raft.log[nextIndex][0]
-        log_send = raft.log[nextIndex:]
-        app = append_message(raft.currentTerm,raft.name,raft.nextIndex[peer],
+        mIndex = raft.matchIndex[peer]
+        prevTerm = raft.log[mIndex][0]
+        log_send = raft.log[mIndex+1:]
+        app = append_message(raft.currentTerm,raft.name,mIndex,
                              prevTerm, log_send, raft.commitIndex, raft.name,peer)
         print "Sending append_message to " + peer
         send_message(app)
