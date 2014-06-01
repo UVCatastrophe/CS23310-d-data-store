@@ -6,6 +6,8 @@ import json
 from zmq.eventloop import ioloop, zmqstream
 ioloop.install()
 
+LEADER_LEASE_TIME = 5.0
+
 #Class with all the state necessary for an instance of RAFT
 class RAFT_instance:
     def __init__(self,name,peers,start_leader=""):
@@ -36,6 +38,7 @@ class RAFT_instance:
         self.senderQueue = [] #Parallel to the id queue. None if sent by the system. Otherwise contains the name of the node which forwarded the message.
 
         #Both are ditionaries which map peer-name to a numeric value
+        self.lastHeard = {} #The last time that a (current term) message was recieved from the given peer
         self.nextIndex = {} #index of the next log entry to send to each server
         self.matchIndex = {} #index of the highest log enty which has been replicated on each server
 
@@ -45,8 +48,14 @@ class RAFT_instance:
             if peer == name or peer == "":
                 continue
             self.numPeers += 1
+            #nextIndex is STRICTLY greater than matchIndex
+            self.lastHeard[peer] = proc.loop.time()
             self.nextIndex[peer] = 1
             self.matchIndex[peer] = 0
+
+        #Add a global timeout to send hearbeat messages
+        if self.isLeader:
+            proc.loop.add_timeout(proc.loop.time() + (LEADER_LEASE_TIME/2), send_heartbeats)
 
     #Updates a LEADER's commit index to the lowest value in matchIndex
     def update_commitIndex(self):
@@ -288,6 +297,7 @@ def apply_log(msg):
         raft.log.append(log)
     raft.lastApplied = len(raft.log)-1
 
+
 #Handles an append message (supposedly) from the master
 def handle_append(msg):
     #A new leader has been elected
@@ -301,13 +311,10 @@ def handle_append(msg):
     if raft.isLeader:
         print "Error, two masters operating with the same term number"
         return
+
+    raft.lastHeard[msg.sender] = proc.loop.time()
     
     update_commit(msg) #Update commit index. Done even for hearbeat message
-
-    #Heartbeat message
-    if len(msg.entries) == 0:
-        append_response(msg, True)
-        return
 
     print "Offending Index: " + str(msg.prevLogIndex)
     lastTerm = raft.log[msg.prevLogIndex][0] #Term of last commited entry
@@ -323,6 +330,9 @@ def handle_append(msg):
 #Either learns of its success and moves toward a quorum, or decrements
 #its index to find a place where their logs are in sync.
 def handle_appendReply(msg):
+    if not raft.isLeader:
+        return
+    
     if msg.term < raft.currentTerm:
         #message lost in the network, ignore
         return
@@ -330,13 +340,14 @@ def handle_appendReply(msg):
     if msg.term > raft.currentTerm:
         print "Error: Follower " + str(msg.sender) + " is responding to the wrong master, or has the wrong term number"
         return
+
+    raft.lastHeard[msg.sender] = proc.loop.time()
     
     if msg.status:#An accepting message
         m = max(msg.prevLogIndex + msg.log_len,raft.matchIndex[msg.sender])
         raft.matchIndex[msg.sender] = m
         raft.nextIndex[msg.sender] = m+1
         last = raft.update_commitIndex()
-        print "LAST :::::: " + str(last)
         #Update the datastore, send out set/get response messages for the newly updated commit indes
         transaction_reply(last)
         return
@@ -345,6 +356,8 @@ def handle_appendReply(msg):
             #stale message
             return
         raft.nextIndex[msg.sender] = min(msg.prevLogIndex-1,raft.nextIndex[msg.sender])
+        #If this has failed, then there has been a failure of some invarient
+        assert raft.nextIndex[msg.sender] > raft.matchIndex[msg.sender]
         append_request(msg.sender)
         return
 
@@ -419,14 +432,7 @@ def handle_get_set(msg):
     raft.log.append( (raft.currentTerm, msg.action, msg.key,msg.value) )
     raft.lastApplied += 1
 
-    for peer in raft.nextIndex:
-        mIndex = raft.matchIndex[peer]
-        prevTerm = raft.log[mIndex][0]
-        log_send = raft.log[mIndex+1:]
-        app = append_message(raft.currentTerm,raft.name,mIndex,
-                             prevTerm, log_send, raft.commitIndex, raft.name,peer)
-        print "Sending append_message to " + peer
-        send_message(app)
+    send_appends()
 
     #Just the leader case. Useful for testing...
     if raft.numPeers == 0:
@@ -435,7 +441,18 @@ def handle_get_set(msg):
             data_store[msg.key] = msg.value
             
         raft.commitIndex = raft.lastApplied
-        transaction_reply(raft.commitIndex-1)    
+        transaction_reply(raft.commitIndex-1)
+        
+#Sends append_message's to each
+def send_appends():
+    for peer in raft.nextIndex:
+        nIndex = raft.nextIndex[peer]
+        prevTerm = raft.log[nIndex-1][0]
+        log_send = raft.log[nIndex:]
+        app = append_message(raft.currentTerm,raft.name,nIndex-1,
+                             prevTerm, log_send, raft.commitIndex, raft.name,peer)
+        print "Sending append_message to " + peer
+        send_message(app)
 
 #Handle the message,
 #return True if the process should terminate
@@ -459,10 +476,13 @@ def send_message(msg):
     proc.send.send_json(msg.to_json())
     return
 
-def printf(s):
-    f = open("out.txt", "a")
-    f.write(s)
-    f.close()
+#Sends a heartbeat message to all peers
+#Makes sure that they have heard from the leader.
+#Also serves to make sure that all logs are up to date on all replicas
+def send_heartbeats():
+    send_appends()
+    if raft.isLeader:
+        proc.loop.add_timeout(proc.loop.time() + (LEADER_LEASE_TIME/2), send_heartbeats)
 
 #--------------------Initialization-------------------------------
 #The state for the currect process' sockets
