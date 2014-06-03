@@ -13,6 +13,7 @@ class RAFT_instance:
     def __init__(self,name,peers,start_leader=""):
         self.currentTerm = 0 #The latest term the server has seen (monotonicly increasing)
         self.votedFor = None #The id of the last candidate vvoted for
+        self.numVotes = 0 #The number of votes recieved this term
 
         #A list of log entries 4-tuple (term,command,key,value)
         #Initialized with one entry for purposes of our implementation
@@ -70,6 +71,23 @@ class RAFT_instance:
         else:
             self.commitIndex = counts[len(counts)/2]
         return oldCommit
+    #Updates the state of the process so that it is now the leader
+    def makeLeader(self):
+        self.isLeader = True
+        for peer in self.nextIndex:
+            #Start by attempting to reconicle the old logs to your current one
+            self.nextIndex[peer] = self.lastApplied + 1
+            self.matchIndex[peer] = 0
+            self.leader = self.name
+    #Sets the current term to the new term and changes appropriate state
+    def new_term(self,term):
+        assert term > self.currentTerm#Must be monotonicaly increasing
+        self.currentTerm = term
+        self.votedFor = None
+        self.numVotes = 0
+        if raft.isLeader:
+            raft.isLeader = False
+        
 
 #Class which contains the necessary state for the process to connect over a socket
 class sock_state:
@@ -310,8 +328,7 @@ def apply_log(msg):
 def handle_append(msg):
     #A new leader has been elected
     if msg.term > raft.currentTerm:
-        raft.currentTerm = msg.term
-        raft.isLeader = False
+        raft.new_term(msg.term)
         return
     if msg.term < raft.currentTerm:
         return #Message that is necessarily out of date. Should reject.
@@ -320,6 +337,7 @@ def handle_append(msg):
         print "Error, two masters operating with the same term number"
         return
 
+    raft.leader = msg.leader
     raft.lastHeard[msg.sender] = proc.loop.time()
     
     update_commit(msg) #Update commit index. Done even for hearbeat message
@@ -377,8 +395,7 @@ def handle_vote(msg):
         return
     # If message has a higher term, then we must update the node.
     elif msg.term > raft.currentTerm:
-        raft.currentTerm = msg.term
-        raft.isLeader = False
+        raft.new_term(msg.term)
     # Two requirements needed to grant vote.
     # Req 1: votedFor is null or candidateId.
     if (raft.votedFor is None) or (raft.votedFor == msg.candidateID):
@@ -391,20 +408,56 @@ def handle_vote(msg):
     # If the terms are the same, then 
     # A's log is more up-to-date than B's if A's is longer (higher max index).
     # TODO: Verify the log-entry structure.
-    self_lastLogTerm = raft.log[-1].term
+    self_lastLogTerm = raft.log[-1][0]
     if msg.lastLogTerm > self_lastLogTerm:
         vote_response(msg, True)
     elif (msg.lastLogTerm == self_lastLogTerm):
         # TODO: Check that we're not off-by-one.
-        self_lastLogIndex = len(raft.log)
+        self_lastLogIndex = len(raft.log)-1
         if msg.lastLogIndex >= self_lastLogIndex:
             vote_response(msg, True)
     else:
         vote_response(msg, False)
 
-# def handle_voteReply(msg):
+def handle_voteReply(msg):
+    if msg.currentTerm < raft.currentTerm:
+        return #Out of date messge
+    
+    if raft.votedFor != raft.name:
+        return #You should not be recieving votes
+    if msg.currentTerm > raft.currentTerm:
+        #Something has gone wrong...
+        print "Error, being voted for without request"
+        return
 
+    if msg.success:
+        raft.numVotes += 1
+    else:
+        return
+    
+    if raft.numVotes >= (raft.numPeers + 1.0)/2:
+        #leader election won.
+        raft.makeLeader()
+        send_heartbeats()
+    
 # ********** END: Andrew's additions **********
+
+#attempt to become the leader by requesting votes from all of the process'
+#peers.
+def request_votes():
+    raft.new_term(raft.currentTerm + 1)
+    raft.votedFor = raft.name
+
+    peers = []
+    for peer in raft.nextIndex:
+        peers.append(peer)
+
+    lastIndex = len(raft.log)-1
+    lastTerm = raft.log[-1][0]
+    msg = requestVote_message(raft.currentTerm,raft.name,
+                              lastIndex,lastTerm, raft.name,peers)
+    raft.send_message(msg)
+
 
 #Sends replies to the broker for each transaction starting at last and going to committedIndex
 def transaction_reply(last):
@@ -506,12 +559,16 @@ def handle_message(msg_type,msg):
     print raft.name + ": handling msg of type " + msg_type 
     if msg_type == "set" or msg_type == "get":
         handle_get_set(msg)
-    if msg_type == "raft_append":
+    elif msg_type == "raft_append":
         handle_append(msg)
-    if msg_type == "raft_appendReply":
+    elif msg_type == "raft_appendReply":
         handle_appendReply(msg)
-    if msg_type == "okay":
+    elif msg_type == "okay":
         return
+    elif msg_type == "raft_requestVote":
+        handle_vote(msg)
+    elif msg_type == "raft_replyVote:
+        handle_voteReply(msg)
     return True
 
 #given a message object, send an object to the message broker
