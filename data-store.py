@@ -274,6 +274,14 @@ def append_response(msg,status):
     send_message(res)
     return
 
+# ********** BEGIN: Andrew's additions ***********
+# responds to a vote message with the given status (True/False)
+def vote_response(msg, status):
+    res = replyVote_message(raft.currentTerm, status, msg.recpt, msg.sender)
+    send_message(res)
+    return
+# ********* END: Andrew's additions **********
+
 #Update the 'commited' index of the current raft instance
 #given an append_message msg
 def update_commit(msg):
@@ -360,6 +368,43 @@ def handle_appendReply(msg):
         assert raft.nextIndex[msg.sender] > raft.matchIndex[msg.sender]
         append_request(msg.sender)
         return
+
+# ********** BEGIN: Andrew's additions **********
+def handle_vote(msg):
+    # Check if the candidate has a valid term.
+    if msg.term < raft.currentTerm:
+        vote_response(msg, False)
+        return
+    # If message has a higher term, then we must update the node.
+    elif msg.term > raft.currentTerm:
+        raft.currentTerm = msg.term
+        raft.isLeader = False
+    # Two requirements needed to grant vote.
+    # Req 1: votedFor is null or candidateId.
+    if (raft.votedFor is None) or (raft.votedFor == msg.candidateID):
+        raft.votedFor = msg.candidateId
+    else:
+        vote_response(msg, False)
+        return
+    # Req 2: The candidate's log is at least as up-to-date as receiver's log.
+    # A's log is more up-to-date log than B's if A's log's last term is higher.
+    # If the terms are the same, then 
+    # A's log is more up-to-date than B's if A's is longer (higher max index).
+    # TODO: Verify the log-entry structure.
+    self_lastLogTerm = raft.log[-1].term
+    if msg.lastLogTerm > self_lastLogTerm:
+        vote_response(msg, True)
+    elif (msg.lastLogTerm == self_lastLogTerm):
+        # TODO: Check that we're not off-by-one.
+        self_lastLogIndex = len(raft.log)
+        if msg.lastLogIndex >= self_lastLogIndex:
+            vote_response(msg, True)
+    else:
+        vote_response(msg, False)
+
+# def handle_voteReply(msg):
+
+# ********** END: Andrew's additions **********
 
 #Sends replies to the broker for each transaction starting at last and going to committedIndex
 def transaction_reply(last):
