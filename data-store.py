@@ -16,9 +16,10 @@ class RAFT_instance:
         self.votedFor = None #The id of the last candidate vvoted for
         self.numVotes = 0 #The number of votes recieved this term
 
-        #A list of log entries 4-tuple (term,command,key,value)
+        #A list of log entries 6-tuple (term,command,key,value,msg_id,sender)
         #Initialized with one entry for purposes of our implementation
-        self.log = [(self.currentTerm,"start","startKey",0)]
+        
+        self.log = [(self.currentTerm,"start","startKey",0,None,None)]
         
         self.commitIndex = 0#Index into the log of the highest log entry that has been commited
         self.lastApplied = 0#the index of the highest log entry applied
@@ -35,12 +36,11 @@ class RAFT_instance:
         else:
             self.isLeader = False
 
-        #--State used when the process is a leader--
-        self.idQueue = [] #The id of a get/set message. Attached to a get/set response
-        self.senderQueue = [] #Parallel to the id queue. None if sent by the system. Otherwise contains the name of the node which forwarded the message.
-
+        self.transactionQueue = [] #Queue for active transactions
         self.leaderlessQueue = [] #Messages queued when there is no leader
 
+
+        #--State used when the process is a leader--
         #Both are ditionaries which map peer-name to a numeric value
         self.lastHeard = {} #The last time that a (current term) message was recieved from the given peer
         self.nextIndex = {} #index of the next log entry to send to each server
@@ -154,6 +154,8 @@ class sock_state:
 
         #Asked to forward the message body back to the message broker
         elif msg_json['type'] == "transaction_forward":
+            if len(raft.transactionQueue) != 0:
+                raft.transactionQueue.pop(0)
             self.send.send_json(msg_json['body'])
             return
         #Parse into a message object and send that to the general handle_message
@@ -280,19 +282,14 @@ class transactionReply_message:
         self.sender = sender
         self.msg_id = msg_id
     def to_json(self):
-        return {'type' : self.action + "Response",
+        j = {'type' : self.action + "Response",
                 'key' : self.key,
                 'value' : self.value,
                 'sender' : self.sender,
-                'response' : self.response,
                 'id' : self.msg_id}
-
-#Handles a transaction message (usually sent from a user)
-def handle_transaction(msg):
-    if not raft.isLeader:
-        reply_msg = transactionReply_message(msg.key,raft.leader,msg.action,"LEADER",msg.sender,msg.recpt)
-        #Send them the location of the leader
-        return
+        if self.response != None:
+            j['error'] = self.response
+        return j
 
 #responds to an append message with the given status
 def append_response(msg,status):
@@ -363,10 +360,12 @@ def handle_append(msg):
         append_response(msg,True)
     if new_leader:
         #handle any transaction messages recived while there was no leader
-        for trans_msg in raft.leaderlessQueue:
+        while len(raft.leaderlessQueue) != 0:
+            trans_msg = raft.leaderlessQueue.pop(0)
             trans_msg.recpt = raft.leader
             trans_msg.sender = raft.name
             send_message(trans_msg)
+        
         proc.loop.add_timeout(proc.loop.time() + LEADER_LEASE_TIME,
                               check_leader_timeout)
     
@@ -472,8 +471,8 @@ def handle_voteReply(msg):
         raft.makeLeader()
         send_heartbeats()
         #Take care of any message requests you recieved
-        for msg in raft.leaderlessQueue:
-            handle_get_set(msg)
+        while len(raft.leaderlessQueue) != 0:
+            handle_get_set(raft.leaderlessQueue.pop(0))
     
 # ********** END: Andrew's additions **********
 
@@ -500,23 +499,21 @@ def check_election():
 #Sends replies to the broker for each transaction starting at last and going to committedIndex
 def transaction_reply(last):
     for i in range(last+1,raft.commitIndex+1):
-        (term,opp,key,value) = raft.log[i]
+        
+        (term,opp,key,value,msg_id,fwd) = raft.log[i]
+        
         if opp == "set":
-            msg_id = raft.idQueue.pop(0)
-            fwd = raft.senderQueue.pop(0)
             data_store[key] = value
             if fwd == None:
-                send_message(transactionReply_message(key,value,opp,"SUCCESS",raft.name,msg_id))
+                send_message(transactionReply_message(key,value,opp,None,raft.name,msg_id))
             else:
-                body = transactionReply_message(key,value,opp,"SUCCESS",raft.name,msg_id).to_json()
+                body = transactionReply_message(key,value,opp,None,raft.name,msg_id).to_json()
                 proc.send.send_json( { 'type' : "transaction_forward", 'destination' : [fwd], 'body' : body })
         elif opp == 'get':
-            msg_id = raft.idQueue.pop(0)
-            fwd = raft.senderQueue.pop(0)
             if key in data_store:
-                res = "SUCCESS"
+                res = None
             else:
-                res = "FAILURE"
+                res = "Error, key not in datastore"
             rply = transactionReply_message(key,data_store[key],opp,res,raft.name,msg_id)
 
             if fwd == None:
@@ -524,7 +521,17 @@ def transaction_reply(last):
             else:
                 body = rply.to_json()
                 proc.send.send_json( { 'type' : "transaction_forward", 'destination' : [fwd], 'body' : body })
-                
+
+def replyTimeout(msg):
+    response = "Request timedout. Please try again"
+    rply = transactionReply_message(msg.key,msg.value,msg.action,response,msg.sender,msg.msg_id)
+    if msg.sender == None:
+        send_message(rply)
+    else:
+        proc.send.send_json( {'type' : 'transaction_forward',
+                              'destination' : [msg.sender],
+                              'body' : rply.to_json()})
+      
 #Parse the json message into a friendly python object
 def parse_json(msg_json):
     msg = None
@@ -554,6 +561,18 @@ def parse_json(msg_json):
 
 #Handles a request to set to a value
 def handle_get_set(msg):
+    
+    #Set up a timeout for the message in the case of a failure
+    #Done for whoever recieves the initial message
+    if msg.sender == None:
+        msg_id = msg.msg_id #closure for the lambda?
+        def callback():
+            if len(raft.transactionQueue) != 0 and raft.transactionQueu[0].msg_id == msg_id:
+                replyTimeout(raft.transactionQueue.pop(0))
+            elif len(raft.leaderlessQueue) != 0 and raft.leaderlessQueue[0].msg_id == msg_id:
+                replyTimeout(raft.leaderlessQueue.pop(0))
+        proc.loop.add_timeout(proc.loop.time() + 0.5*LEADER_LEASE_TIME,callback)
+    
     if not raft.isLeader:
         #Queue the message until a leader has been decided
         if raft.leader == None:
@@ -563,13 +582,10 @@ def handle_get_set(msg):
             msg.recpt = raft.leader
             msg.sender = raft.name
             send_message(msg)
+                
         return
-
-    raft.idQueue.append(msg.msg_id)
-    print "MSG SENDER : " + str(msg.sender)
-    raft.senderQueue.append(msg.sender)
     
-    raft.log.append( (raft.currentTerm, msg.action, msg.key,msg.value) )
+    raft.log.append( (raft.currentTerm, msg.action, msg.key,msg.value,msg.msg_id,msg.sender) )
 
     send_appends()
 
