@@ -11,7 +11,7 @@ LEADER_LEASE_TIME = 5.0
 
 #Class with all the state necessary for an instance of RAFT
 class RAFT_instance:
-    def __init__(self,name,peers,start_leader=""):
+    def __init__(self,name,peers,start_leader=None):
         self.currentTerm = 0 #The latest term the server has seen (monotonicly increasing)
         self.votedFor = None #The id of the last candidate vvoted for
         self.numVotes = 0 #The number of votes recieved this term
@@ -38,6 +38,8 @@ class RAFT_instance:
         #--State used when the process is a leader--
         self.idQueue = [] #The id of a get/set message. Attached to a get/set response
         self.senderQueue = [] #Parallel to the id queue. None if sent by the system. Otherwise contains the name of the node which forwarded the message.
+
+        self.leaderlessQueue = [] #Messages queued when there is no leader
 
         #Both are ditionaries which map peer-name to a numeric value
         self.lastHeard = {} #The last time that a (current term) message was recieved from the given peer
@@ -76,7 +78,6 @@ class RAFT_instance:
     def makeLeader(self):
         self.isLeader = True
         for peer in self.nextIndex:
-            #Start by attempting to reconicle the old logs to your current one
             self.nextIndex[peer] = self.lastApplied + 1
             self.matchIndex[peer] = 0
             self.leader = self.name
@@ -96,8 +97,8 @@ class RAFT_instance:
 
 #Class which contains the necessary state for the process to connect over a socket
 class sock_state:
-    def __init__(self):
-        self.logAll = True #Log all messages sent/recieved from the broker
+    def __init__(self,log_all=False):
+        self.logAll = log_all #Log all messages sent/recieved from the broker
         self.loop = ioloop.ZMQIOLoop.current()
         self.context = zmq.Context()
         self.isConnected = False #Changed after recieving a hello message
@@ -160,6 +161,8 @@ class sock_state:
         elif msg_json['type'] == 'debug_stop':
             print "debug stop"
             return
+        elif msg_json['type'] == 'debug-startElection':
+            request_votes()
             
         else:
             if 'destination' in msg_json and (not raft.name in msg_json['destination']):
@@ -238,7 +241,7 @@ class replyVote_message:
         self.voteGranted = voteGranted #True or False if the vote was granted or not
     def to_json(self):
         return { 'type' : 'raft_replyVote', 'term' : self.term, 'voteGranted' : self.voteGranted,
-                 'sender' : self.sender, 'destination' : self.destination }
+                 'sender' : self.sender, 'destination' : [self.recpt] }
 
 #A message used for Byzantine generals message passing
 class byzantine_message:
@@ -300,7 +303,7 @@ def append_response(msg,status):
 # ********** BEGIN: Andrew's additions ***********
 # responds to a vote message with the given status (True/False)
 def vote_response(msg, status):
-    res = replyVote_message(raft.currentTerm, status, msg.recpt, msg.sender)
+    res = replyVote_message(raft.currentTerm, status, raft.name, msg.sender)
     send_message(res)
     return
 # ********* END: Andrew's additions **********
@@ -312,7 +315,7 @@ def update_commit(msg):
         raft.commitIndex = min(msg.leaderCommit, msg.prevLogIndex)
         for log in range(msg.prevLogIndex,raft.commitIndex):
             #Update the value of the data-store to the most recent one
-            if log[1] == "get":
+            if log[1] == "set":
                 #data_store[key] = val
                 data_store[log[2]] = log[3]
     return
@@ -340,15 +343,18 @@ def handle_append(msg):
     if raft.isLeader:
         print "Error, two masters operating with the same term number"
         return
-    if raft.leader == None:
-        proc.loop.add_timeout(proc.loop.time() + LEADER_LEASE_TIME, check_leader_timeout)
 
+    new_leader = False
+    if raft.leader == None:
+        new_leader = True
+    else:
+        assert raft.leader == msg.leader
+    
     raft.leader = msg.leader
     raft.lastHeard[msg.sender] = proc.loop.time()
     
     update_commit(msg) #Update commit index. Done even for hearbeat message
 
-    print "Offending Index: " + str(msg.prevLogIndex)
     lastTerm = raft.log[msg.prevLogIndex][0] #Term of last commited entry
     #Log is inconsistent with respect to master
     if not(lastTerm == msg.prevLogTerm):
@@ -356,6 +362,15 @@ def handle_append(msg):
     else:
         apply_log(msg)
         append_response(msg,True)
+    if new_leader:
+        #handle any transaction messages recived while there was no leader
+        for trans_msg in raft.leaderlessQueue:
+            trans_msg.recpt = raft.leader
+            trans_msg.sender = raft.name
+            send_message(trans_msg)
+        proc.loop.add_timeout(proc.loop.time() + LEADER_LEASE_TIME,
+                              check_leader_timeout)
+    
 
 # Called when after a certain amount of time a follower received a
 # append request. This only refreshes the timer if we had recently
@@ -414,8 +429,8 @@ def handle_vote(msg):
         raft.new_term(msg.term)
     # Two requirements needed to grant vote.
     # Req 1: votedFor is null or candidateId.
-    if (raft.votedFor is None) or (raft.votedFor == msg.candidateID):
-        raft.votedFor = msg.candidateId
+    if (raft.votedFor is None) or (raft.votedFor == msg.candidate):
+        raft.votedFor = msg.candidate
     else:
         vote_response(msg, False)
         return
@@ -436,24 +451,30 @@ def handle_vote(msg):
         vote_response(msg, False)
 
 def handle_voteReply(msg):
-    if msg.currentTerm < raft.currentTerm:
+    if msg.term < raft.currentTerm:
         return #Out of date messge
     
     if raft.votedFor != raft.name:
+        print "DID NOT VOTE FOR SELF"
         return #You should not be recieving votes
-    if msg.currentTerm > raft.currentTerm:
-        raft.new_term(msg.currentTerm)
+    if msg.term > raft.currentTerm:
+        print "TERM OUT OF DATE"
+        raft.new_term(msg.term)
         return
 
-    if msg.success:
+    if msg.voteGranted:
         raft.numVotes += 1
     else:
         return
     
     if raft.numVotes >= (raft.numPeers + 1.0)/2:
         #leader election won.
+        print "HERE HERE HERE HERE"
         raft.makeLeader()
         send_heartbeats()
+        #Take care of any message requests you recieved
+        for msg in raft.leaderlessQueue:
+            handle_get_set(msg)
     
 # ********** END: Andrew's additions **********
 
@@ -471,7 +492,7 @@ def request_votes():
     lastTerm = raft.log[-1][0]
     msg = requestVote_message(raft.currentTerm,raft.name,
                               lastIndex,lastTerm, raft.name,peers)
-    raft.send_message(msg)
+    send_message(msg)
 
 def check_election():
     if raft.leader == None:
@@ -527,18 +548,22 @@ def parse_json(msg_json):
         msg = requestVote_message(msg_json['term'],msg_json['candidate'],msg_json['lastLogIndex'],
                                   msg_json['lastLogTerm'],msg_json['sender'],msg_json['destination'][0])
     elif msg_json['type'] == 'raft_replyVote':
-        msg = requestVote_message(msg_json['term'],msg_json['voteGranted'],msg_json['sender'],
-                                  None)
+        msg = replyVote_message(msg_json['term'],msg_json['voteGranted'],msg_json['sender'],
+                                  raft.name)
         
     return ( msg_json['type'], msg)
 
 #Handles a request to set to a value
 def handle_get_set(msg):
     if not raft.isLeader:
+        #Queue the message until a leader has been decided
+        if raft.leader == None:
+            raft.leaderlessQueue.append(msg)
         #Redirect to the leader
-        msg.recpt = raft.leader
-        msg.sender = raft.name
-        send_message(msg)
+        else:
+            msg.recpt = raft.leader
+            msg.sender = raft.name
+            send_message(msg)
         return
 
     raft.idQueue.append(msg.msg_id)
@@ -550,7 +575,7 @@ def handle_get_set(msg):
 
     send_appends()
 
-    #Just the leader case. Useful for testing...
+    #Case with no peers. Useful for testing...
     if raft.numPeers == 0:
         print "zero peer case"
         if msg.action == "set":
@@ -574,7 +599,8 @@ def send_appends():
 #return True if the process should terminate
 #return False othermise
 def handle_message(msg_type,msg):
-    print raft.name + ": handling msg of type " + msg_type 
+    if proc.logAll:
+        print raft.name + ": handling msg of type " + msg_type 
     if msg_type == "set" or msg_type == "get":
         handle_get_set(msg)
     elif msg_type == "raft_append":
@@ -585,7 +611,7 @@ def handle_message(msg_type,msg):
         return
     elif msg_type == "raft_requestVote":
         handle_vote(msg)
-    elif msg_type == "raft_replyVote:
+    elif msg_type == "raft_replyVote":
         handle_voteReply(msg)
     return True
 
@@ -605,8 +631,6 @@ def send_heartbeats():
         proc.loop.add_timeout(proc.loop.time() + (LEADER_LEASE_TIME/2), send_heartbeats)
 
 #--------------------Initialization-------------------------------
-#The state for the currect process' sockets
-proc = sock_state()
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--pub-endpoint',
@@ -626,9 +650,13 @@ parser.add_argument('--peer-names',
   default='')
 #Used to skip master election for testing.
 parser.add_argument('--start-leader',
-    dest='start_leader', type=str, default="")
+    dest='start_leader', type=str, default=None)
+parser.add_argument('--log_all', type=bool, default=False)
 args = parser.parse_args()
 args.peer_names = args.peer_names.split(',')
+
+#The state for the currect process' sockets
+proc = sock_state(log_all=args.log_all)
 
 #The state for the current process' RAFT_instance
 raft = RAFT_instance(args.node_name,args.peer_names,start_leader=args.start_leader)
