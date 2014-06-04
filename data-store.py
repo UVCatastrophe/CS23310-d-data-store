@@ -78,7 +78,7 @@ class RAFT_instance:
     def makeLeader(self):
         self.isLeader = True
         for peer in self.nextIndex:
-            self.nextIndex[peer] = self.lastApplied + 1
+            self.nextIndex[peer] = len(raft.log)
             self.matchIndex[peer] = 0
             self.leader = self.name
     #Sets the current term to the new term and changes appropriate state
@@ -318,19 +318,18 @@ def update_commit(msg):
             if log[1] == "set":
                 #data_store[key] = val
                 data_store[log[2]] = log[3]
+            raft.lastApplied += 1
     return
 
-#Apply the given logs (in the append message)
+#update given logs (in the append message)
 # to the current log for this instance
-def apply_log(msg):
+def update_log(msg):
     #Remove any uncommited entries that conflict
-    for i in range(msg.prevLogIndex+1,raft.lastApplied+1):
+    for i in range(msg.prevLogIndex+1,len(raft.log)):
         raft.log.pop(i)
 
     for log in msg.entries:
         raft.log.append(log)
-    raft.lastApplied = len(raft.log)-1
-
 
 #Handles an append message (supposedly) from the master
 def handle_append(msg):
@@ -360,7 +359,7 @@ def handle_append(msg):
     if not(lastTerm == msg.prevLogTerm):
         append_response(msg,False)
     else:
-        apply_log(msg)
+        update_log(msg)
         append_response(msg,True)
     if new_leader:
         #handle any transaction messages recived while there was no leader
@@ -571,7 +570,6 @@ def handle_get_set(msg):
     raft.senderQueue.append(msg.sender)
     
     raft.log.append( (raft.currentTerm, msg.action, msg.key,msg.value) )
-    raft.lastApplied += 1
 
     send_appends()
 
@@ -580,9 +578,8 @@ def handle_get_set(msg):
         print "zero peer case"
         if msg.action == "set":
             data_store[msg.key] = msg.value
-            
-        raft.commitIndex = raft.lastApplied
-        transaction_reply(raft.commitIndex-1)
+
+        transaction_reply(len(raft.log)-2)
         
 #Sends append_message's to each
 def send_appends():

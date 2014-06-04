@@ -4,3 +4,5 @@ start test3 --peer-names test,test2
 send {"destination" : ["test"], "type" : "debug-startElection"}
 set foo bar
 get foo
+set foo baz
+get foo
