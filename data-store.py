@@ -3,6 +3,7 @@ import argparse
 import sys
 import signal
 import json
+import random
 from zmq.eventloop import ioloop, zmqstream
 ioloop.install()
 
@@ -85,8 +86,12 @@ class RAFT_instance:
         self.currentTerm = term
         self.votedFor = None
         self.numVotes = 0
+        self.leader = None
         if raft.isLeader:
             raft.isLeader = False
+        # Random time interval from 1-3 secs
+        rand_time = 1 + 2 * random.random()
+        proc.loop.add_timeout(proc.loop.time() + rand_time, check_election)
         
 
 #Class which contains the necessary state for the process to connect over a socket
@@ -329,13 +334,14 @@ def handle_append(msg):
     #A new leader has been elected
     if msg.term > raft.currentTerm:
         raft.new_term(msg.term)
-        return
     if msg.term < raft.currentTerm:
         return #Message that is necessarily out of date. Should reject.
 
     if raft.isLeader:
         print "Error, two masters operating with the same term number"
         return
+    if raft.leader == None:
+        proc.loop.add_timeout(proc.loop.time() + LEADER_LEASE_TIME, check_leader_timeout)
 
     raft.leader = msg.leader
     raft.lastHeard[msg.sender] = proc.loop.time()
@@ -351,6 +357,16 @@ def handle_append(msg):
         apply_log(msg)
         append_response(msg,True)
 
+# Called when after a certain amount of time a follower received a
+# append request. This only refreshes the timer if we had recently
+# heard from the leader. Otherwise, it starts an election.
+def check_leader_timeout():
+    if raft.leader is None:
+        request_votes()
+    elif raft.lastHeard[raft.leader] + LEADER_LEASE_TIME < proc.loop.time():
+        request_votes()
+    else:
+        proc.loop.add_timeout(raft.lastHeard[raft.leader] + LEADER_LEASE_TIME, check_leader_timeout)
 
 #Handles the response to a append message sent by a leader to the a follower.
 #Either learns of its success and moves toward a quorum, or decrements
@@ -426,8 +442,7 @@ def handle_voteReply(msg):
     if raft.votedFor != raft.name:
         return #You should not be recieving votes
     if msg.currentTerm > raft.currentTerm:
-        #Something has gone wrong...
-        print "Error, being voted for without request"
+        raft.new_term(msg.currentTerm)
         return
 
     if msg.success:
@@ -458,6 +473,9 @@ def request_votes():
                               lastIndex,lastTerm, raft.name,peers)
     raft.send_message(msg)
 
+def check_election():
+    if raft.leader == None:
+        request_votes()
 
 #Sends replies to the broker for each transaction starting at last and going to committedIndex
 def transaction_reply(last):
