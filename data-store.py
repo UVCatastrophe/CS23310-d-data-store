@@ -59,7 +59,6 @@ class RAFT_instance:
 
         #Add a global timeout to send hearbeat messages
         if self.isLeader:
-            return
             proc.loop.add_timeout(proc.loop.time() + (LEADER_LEASE_TIME/2), send_heartbeats)
 
     #Updates a LEADER's commit index to the lowest value in matchIndex
