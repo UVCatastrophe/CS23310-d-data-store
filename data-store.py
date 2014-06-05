@@ -65,10 +65,12 @@ class RAFT_instance:
     def update_commitIndex(self):
         counts = []
         for peer in self.matchIndex:
-            i = self.matchIndex[peer]
-            counts.append(i)
+            #Build a list of the length of the log on each process
+            counts.append(self.matchIndex[peer])
+        counts.append(len(self.log)-1)#inclued the current process
         counts.sort()
         oldCommit = self.commitIndex
+        #Now find the median
         if len(counts) % 2 == 0:
             newCommit = counts[len(counts)/2 -1]
         else:
@@ -493,6 +495,7 @@ def request_votes():
     print raft.name + " requesting votes"
     raft.new_term(raft.currentTerm + 1)
     raft.votedFor = raft.name
+    raft.numVotes += 1 #You have voted for yourself
 
     peers = []
     for peer in raft.nextIndex:
@@ -577,9 +580,12 @@ def handle_get_set(msg):
     #Set up a timeout for the message in the case of a failure
     #Done for whoever recieves the initial message
     if msg.sender == None:
-        msg_id = msg.msg_id #closure for the lambda?
+        print "ADDING CALLBACK"
+        msg_id = msg.msg_id #closure for the lambda.
         def callback():
-            if len(raft.transactionQueue) != 0 and raft.transactionQueu[0].msg_id == msg_id:
+            print "CALLING CALLBACK"
+            if len(raft.transactionQueue) != 0 and raft.transactionQueue[0].msg_id == msg_id:
+                print "DOING RIGHT"
                 replyTimeout(raft.transactionQueue.pop(0))
             elif len(raft.leaderlessQueue) != 0 and raft.leaderlessQueue[0].msg_id == msg_id:
                 replyTimeout(raft.leaderlessQueue.pop(0))
@@ -591,6 +597,7 @@ def handle_get_set(msg):
             raft.leaderlessQueue.append(msg)
         #Redirect to the leader
         else:
+            raft.transactionQueue.append(msg)
             msg.recpt = raft.leader
             msg.sender = raft.name
             send_message(msg)
@@ -618,7 +625,7 @@ def send_appends():
         log_send = raft.log[nIndex:]
         app = append_message(raft.currentTerm,raft.name,nIndex-1,
                              prevTerm, log_send, raft.commitIndex, raft.name,peer)
-        print "Sending append_message to " + peer
+        #print "Sending append_message to " + peer
         send_message(app)
 
 #Handle the message,
