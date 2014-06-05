@@ -595,16 +595,16 @@ def parse_json(msg_json):
 def handle_get_set(msg):
     
     #Set up a timeout for the message in the case of a failure
-    #Done for whoever recieves the initial message
-    if msg.sender == None:
-        msg_id = msg.msg_id #closure for the lambda.
-        def callback():
-            if len(raft.transactionQueue) != 0 and raft.transactionQueue[0].msg_id == msg_id:
-                replyTimeout(raft.transactionQueue.pop(0))
-            elif len(raft.leaderlessQueue) != 0 and raft.leaderlessQueue[0].msg_id == msg_id:
-                replyTimeout(raft.leaderlessQueue.pop(0))
-        proc.loop.add_timeout(proc.loop.time() + LEADER_LEASE_TIME*4,callback)
-    
+#Done for whoever recieves the initial message
+    msg_id = msg.msg_id #closure for the lambda.
+    def callback():
+        if len(raft.transactionQueue) != 0 and raft.transactionQueue[0].msg_id == msg_id:
+            replyTimeout(raft.transactionQueue.pop(0))
+        elif len(raft.leaderlessQueue) != 0 and raft.leaderlessQueue[0].msg_id == msg_id:
+            replyTimeout(raft.leaderlessQueue.pop(0))
+    proc.loop.add_timeout(proc.loop.time() + LEADER_LEASE_TIME*4,callback)
+
+
     if not raft.isLeader:
         #Queue the message until a leader has been decided
         if raft.leader == None:
