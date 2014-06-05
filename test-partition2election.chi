@@ -6,10 +6,10 @@ start test5 --peer-names test,test2,test3,test4
 send {"destination" : ["test"], "type" : "debug-startElection"}
 after 10 {
 set foo bar 
-after 8 {
+after 30 {
 split p test4,test5
-set foo 1
-set foo 1
+set test4 foo 1
+set test3 foo 1
 after 100 {
 join p
 after 100 {

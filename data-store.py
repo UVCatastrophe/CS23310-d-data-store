@@ -78,6 +78,10 @@ class RAFT_instance:
 
         if newCommit > oldCommit:
             raft.commitIndex = newCommit
+            for i in range(oldCommit+1,newCommit+1):
+                if raft.log[i][1] == "set":
+                    data_store[raft.log[i][2]] = raft.log[i][3]
+            
 
         return oldCommit
     #Updates the state of the process so that it is now the leader
@@ -315,7 +319,7 @@ def vote_response(msg, status):
 def update_commit(msg):
     if msg.leaderCommit > raft.commitIndex:
         raft.commitIndex = msg.leaderCommit
-        for i in range(raft.lastApplied,min(len(raft.log),raft.commitIndex)):
+        for i in range(raft.lastApplied,min(len(raft.log),raft.commitIndex+1)):
             log = raft.log[i]
             #Update the value of the data-store to the most recent one
             if log[1] == "set":
@@ -354,16 +358,16 @@ def handle_append(msg):
     
     raft.leader = msg.leader
     raft.lastHeard[msg.sender] = proc.loop.time()
+
+    update_commit(msg) #Update commit index. Done even for hearbeat message
     
     #Log is behind the leader's
     if (msg.prevLogIndex > len(raft.log)-1):
         append_response(msg,False)
     #Log is inconsistent
     elif raft.log[msg.prevLogIndex][0] != msg.prevLogTerm:
-        update_commit(msg) #Update commit index. Done even for hearbeat message
         append_response(msg,False)
     else:
-        update_commit(msg) #Update commit index. Done even for hearbeat message
         update_log(msg)
         append_response(msg,True)
     if new_leader:
@@ -423,8 +427,8 @@ def handle_appendReply(msg):
         raft.matchIndex[msg.sender] = m
         raft.nextIndex[msg.sender] = m+1
         last = raft.update_commitIndex()
-        #Update the datastore, send out set/get response messages for the newly updated commit indes
         if last < raft.commitIndex:
+            #Update the datastore, send out set/get response messages for the newly updated commit indes
             send_heartbeats(refreash="False")
         transaction_reply(last)
         return
@@ -489,9 +493,12 @@ def handle_voteReply(msg):
     if raft.numVotes >= (raft.numPeers + 1.0)/2:
         #leader election
         raft.makeLeader()
-        send_heartbeats()
+        #If you are made leader, you can update your commit index
+        print raft.commitIndex
+        last = raft.update_commitIndex()
+        send_heartbeats(refreash="False")
         if proc.logAll or proc.logProgress:
-            proc.send.send_json({'type' : 'log', 'debug' : raft.name + ' is now the leader'})
+           proc.send.send_json({'type' : 'log', 'debug' : raft.name + ' is now the leader'})
         #Take care of any message requests you recieved
         while len(raft.leaderlessQueue) != 0:
             handle_get_set(raft.leaderlessQueue.pop(0))
