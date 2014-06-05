@@ -7,7 +7,7 @@ import random
 from zmq.eventloop import ioloop, zmqstream
 ioloop.install()
 
-LEADER_LEASE_TIME = 5.0
+LEADER_LEASE_TIME = 1.0
 
 #Class with all the state necessary for an instance of RAFT
 class RAFT_instance:
@@ -59,7 +59,7 @@ class RAFT_instance:
 
         #Add a global timeout to send hearbeat messages
         if self.isLeader:
-            proc.loop.add_timeout(proc.loop.time() + (LEADER_LEASE_TIME/2), send_heartbeats)
+            proc.loop.add_timeout(proc.loop.time() + (LEADER_LEASE_TIME*.333), send_heartbeats)
 
     #Updates a LEADER's commit index to the lowest value in matchIndex
     def update_commitIndex(self):
@@ -83,13 +83,12 @@ class RAFT_instance:
     #Updates the state of the process so that it is now the leader
     def makeLeader(self):
         self.isLeader = True
+        self.leader = self.name
         for peer in self.nextIndex:
             self.nextIndex[peer] = len(raft.log)
             self.matchIndex[peer] = 0
-            self.leader = self.name
     #Sets the current term to the new term and changes appropriate state
     def new_term(self,term):
-        print raft.name + " rolling over to term " + str(term)
         assert term > self.currentTerm#Must be monotonicaly increasing
         self.currentTerm = term
         self.votedFor = None
@@ -98,7 +97,7 @@ class RAFT_instance:
         if raft.isLeader:
             raft.isLeader = False
         # Random time interval from 1-3 secs
-        rand_time = 1 + 2 * random.random()
+        rand_time = LEADER_LEASE_TIME + 2.0*LEADER_LEASE_TIME * random.random()
         proc.loop.add_timeout(proc.loop.time() + rand_time, check_election)
         
 
@@ -106,6 +105,7 @@ class RAFT_instance:
 class sock_state:
     def __init__(self,log_all=False):
         self.logAll = log_all #Log all messages sent/recieved from the broker
+        self.logProgress = True #Log master elections
         self.loop = ioloop.ZMQIOLoop.current()
         self.context = zmq.Context()
         self.isConnected = False #Changed after recieving a hello message
@@ -317,7 +317,7 @@ def vote_response(msg, status):
 def update_commit(msg):
     if msg.leaderCommit > raft.commitIndex:
         raft.commitIndex = msg.leaderCommit
-        for i in range(raft.lastApplied,raft.commitIndex):
+        for i in range(raft.lastApplied,min(len(raft.log),raft.commitIndex)):
             log = raft.log[i]
             #Update the value of the data-store to the most recent one
             if log[1] == "set":
@@ -357,13 +357,15 @@ def handle_append(msg):
     raft.leader = msg.leader
     raft.lastHeard[msg.sender] = proc.loop.time()
     
-    update_commit(msg) #Update commit index. Done even for hearbeat message
-
-    lastTerm = raft.log[msg.prevLogIndex][0] #Term of last commited entry
-    #Log is inconsistent with respect to master
-    if not(lastTerm == msg.prevLogTerm):
+    #Log is behind the leader's
+    if (msg.prevLogIndex > len(raft.log)-1):
+        append_response(msg,False)
+    #Log is inconsistent
+    elif raft.log[msg.prevLogIndex][0] != msg.prevLogTerm:
+        update_commit(msg) #Update commit index. Done even for hearbeat message
         append_response(msg,False)
     else:
+        update_commit(msg) #Update commit index. Done even for hearbeat message
         update_log(msg)
         append_response(msg,True)
     if new_leader:
@@ -382,12 +384,23 @@ def handle_append(msg):
 # append request. This only refreshes the timer if we had recently
 # heard from the leader. Otherwise, it starts an election.
 def check_leader_timeout():
-    if raft.leader is None:
-        request_votes()
-    elif raft.lastHeard[raft.leader] + LEADER_LEASE_TIME < proc.loop.time():
+    if raft.leader == None:
+        return
+    if raft.isLeader:
+        return
+    if raft.lastHeard[raft.leader] + LEADER_LEASE_TIME < proc.loop.time():
+        print raft.name + " LEADER TIMEOUT"
         request_votes()
     else:
         proc.loop.add_timeout(raft.lastHeard[raft.leader] + LEADER_LEASE_TIME, check_leader_timeout)
+
+def append_request(peer):
+    nIndex = raft.nextIndex[peer]
+    prevTerm = raft.log[nIndex-1][0]
+    log_send = raft.log[nIndex:]
+    app = append_message(raft.currentTerm,raft.name,nIndex-1,
+                        prevTerm, log_send, raft.commitIndex, raft.name,peer)
+    send_message(app)
 
 #Handles the response to a append message sent by a leader to the a follower.
 #Either learns of its success and moves toward a quorum, or decrements
@@ -437,7 +450,7 @@ def handle_vote(msg):
         raft.new_term(msg.term)
     # Two requirements needed to grant vote.
     # Req 1: votedFor is null or candidateId.
-    if (raft.votedFor is None) or (raft.votedFor == msg.candidate):
+    if raft.votedFor == None:
         raft.votedFor = msg.candidate
     else:
         vote_response(msg, False)
@@ -451,7 +464,6 @@ def handle_vote(msg):
     if msg.lastLogTerm > self_lastLogTerm:
         vote_response(msg, True)
     elif (msg.lastLogTerm == self_lastLogTerm):
-        # TODO: Check that we're not off-by-one.
         self_lastLogIndex = len(raft.log)-1
         if msg.lastLogIndex >= self_lastLogIndex:
             vote_response(msg, True)
@@ -463,7 +475,6 @@ def handle_voteReply(msg):
         return #Out of date messge
     
     if raft.votedFor != raft.name:
-        print "DID NOT VOTE FOR SELF"
         return #You should not be recieving votes
     if msg.term > raft.currentTerm:
         raft.new_term(msg.term)
@@ -475,14 +486,13 @@ def handle_voteReply(msg):
 
     if msg.voteGranted:
         raft.numVotes += 1
-    else:
-        return
     
     if raft.numVotes >= (raft.numPeers + 1.0)/2:
-        print raft.name + " is now the leader. its commit index is " + str(raft.commitIndex)
-        #leader election won.
+        #leader election
         raft.makeLeader()
         send_heartbeats()
+        if proc.logAll or proc.logProgress:
+            proc.send.send_json({'type' : 'log', 'debug' : raft.name + ' is now the leader'})
         #Take care of any message requests you recieved
         while len(raft.leaderlessQueue) != 0:
             handle_get_set(raft.leaderlessQueue.pop(0))
@@ -492,7 +502,8 @@ def handle_voteReply(msg):
 #attempt to become the leader by requesting votes from all of the process'
 #peers.
 def request_votes():
-    print raft.name + " requesting votes"
+    if proc.logAll:
+        proc.send.send_json({'type' : 'log', 'debug' : raft.name + ' is requesting leadership'})
     raft.new_term(raft.currentTerm + 1)
     raft.votedFor = raft.name
     raft.numVotes += 1 #You have voted for yourself
@@ -509,6 +520,8 @@ def request_votes():
 
 def check_election():
     if raft.leader == None:
+        if raft.name != "test4" and raft.name != "test5":
+            print raft.name + " requesting votes from check_election " 
         request_votes()
 
 #Sends replies to the broker for each transaction starting at last and going to committedIndex
@@ -527,10 +540,11 @@ def transaction_reply(last):
         elif opp == 'get':
             if key in data_store:
                 res = None
+                rply = transactionReply_message(key,data_store[key],opp,res,raft.name,msg_id)
             else:
                 res = "Error, key not in datastore"
-            rply = transactionReply_message(key,data_store[key],opp,res,raft.name,msg_id)
-
+                rply = transactionReply_message(key,None,opp,res,raft.name,msg_id)
+            
             if fwd == None:
                 send_message(rply)
             else:
@@ -580,16 +594,13 @@ def handle_get_set(msg):
     #Set up a timeout for the message in the case of a failure
     #Done for whoever recieves the initial message
     if msg.sender == None:
-        print "ADDING CALLBACK"
         msg_id = msg.msg_id #closure for the lambda.
         def callback():
-            print "CALLING CALLBACK"
             if len(raft.transactionQueue) != 0 and raft.transactionQueue[0].msg_id == msg_id:
-                print "DOING RIGHT"
                 replyTimeout(raft.transactionQueue.pop(0))
             elif len(raft.leaderlessQueue) != 0 and raft.leaderlessQueue[0].msg_id == msg_id:
                 replyTimeout(raft.leaderlessQueue.pop(0))
-        proc.loop.add_timeout(proc.loop.time() + 0.5*LEADER_LEASE_TIME,callback)
+        proc.loop.add_timeout(proc.loop.time() + LEADER_LEASE_TIME*4,callback)
     
     if not raft.isLeader:
         #Queue the message until a leader has been decided
@@ -661,7 +672,7 @@ def send_message(msg):
 def send_heartbeats(refreash=True):
     if raft.isLeader:
         send_appends()
-        proc.loop.add_timeout(proc.loop.time() + (LEADER_LEASE_TIME/2), send_heartbeats)
+        proc.loop.add_timeout(proc.loop.time() + (LEADER_LEASE_TIME*.333), send_heartbeats)
 
 #--------------------Initialization-------------------------------
 
