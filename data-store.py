@@ -621,7 +621,6 @@ def handle_get_set(msg):
         msg.sender = raft.name
         send_message(msg)    
         return
-
     raft.log.append( (raft.currentTerm, msg.action, msg.key,msg.value,msg.msg_id,msg.sender) )
 
     send_appends()
