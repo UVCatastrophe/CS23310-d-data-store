@@ -616,7 +616,7 @@ def handle_get_set(msg):
     if raft.sender == None:
         raft.transactionQueue.append(msg)
 
-    if not raft.isLeader
+    if not raft.isLeader:
         msg.recpt = raft.leader
         msg.sender = raft.name
         send_message(msg)    
