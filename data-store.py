@@ -100,8 +100,13 @@ class RAFT_instance:
         self.leader = None
         if raft.isLeader:
             raft.isLeader = False
-        # Random time interval from 1-3 secs
-        rand_time = LEADER_LEASE_TIME + 3.5*LEADER_LEASE_TIME * random.random()
+
+        def check_election():
+            if raft.currentTerm == term and raft.leader == None:
+                request_votes()
+        
+        # Random time interval from 2-4 secs
+        rand_time = LEADER_LEASE_TIME + 2.0*LEADER_LEASE_TIME * random.random()
         proc.loop.add_timeout(proc.loop.time() + rand_time, check_election)
         
 
@@ -521,10 +526,6 @@ def request_votes():
     msg = requestVote_message(raft.currentTerm,raft.name,
                               lastIndex,lastTerm, raft.name,peers)
     send_message(msg)
-
-def check_election():
-    if raft.leader == None:
-        request_votes()
 
 #Sends replies to the broker for each transaction starting at last and going to committedIndex
 def transaction_reply(last):

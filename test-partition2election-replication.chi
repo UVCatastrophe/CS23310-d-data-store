@@ -1,0 +1,26 @@
+start test --peer-names test2,test3,test4,test5
+start test2 --peer-names test,test3,test4,test5
+start test3 --peer-names test,test2,test4,test5
+start test4 --peer-names test,test2,test3,test5
+start test5 --peer-names test,test2,test3,test4
+send {"destination" : ["test"], "type" : "debug-startElection"}
+after 10 {
+set foo bar 
+after 8 {
+split p test4,test5
+set test4 foo 1
+set test3 foo 1
+after 25 {
+join p
+after 25 {
+get foo
+after 25 {
+send {"destination" : ["test5"], "type" : "debug-startElection"}
+after 12{
+get foo
+}
+}
+}
+}
+}
+}
