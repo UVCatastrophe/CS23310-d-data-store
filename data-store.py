@@ -101,7 +101,7 @@ class RAFT_instance:
         if raft.isLeader:
             raft.isLeader = False
         # Random time interval from 1-3 secs
-        rand_time = LEADER_LEASE_TIME + 2.0*LEADER_LEASE_TIME * random.random()
+        rand_time = LEADER_LEASE_TIME + 3.5*LEADER_LEASE_TIME * random.random()
         proc.loop.add_timeout(proc.loop.time() + rand_time, check_election)
         
 
@@ -453,9 +453,7 @@ def handle_vote(msg):
         raft.new_term(msg.term)
     # Two requirements needed to grant vote.
     # Req 1: votedFor is null or candidateId.
-    if raft.votedFor == None:
-        raft.votedFor = msg.candidate
-    else:
+    if raft.votedFor != None:
         vote_response(msg, False)
         return
     # Req 2: The candidate's log is at least as up-to-date as receiver's log.
@@ -465,10 +463,12 @@ def handle_vote(msg):
     # TODO: Verify the log-entry structure.
     self_lastLogTerm = raft.log[-1][0]
     if msg.lastLogTerm > self_lastLogTerm:
+        raft.votedFor = msg.candidate
         vote_response(msg, True)
     elif (msg.lastLogTerm == self_lastLogTerm):
         self_lastLogIndex = len(raft.log)-1
         if msg.lastLogIndex >= self_lastLogIndex:
+            raft.votedFor = msg.candidate
             vote_response(msg, True)
     else:
         vote_response(msg, False)
@@ -494,11 +494,9 @@ def handle_voteReply(msg):
         #leader election
         raft.makeLeader()
         #If you are made leader, you can update your commit index
-        print raft.commitIndex
-        last = raft.update_commitIndex()
         send_heartbeats(refreash="False")
         if proc.logAll or proc.logProgress:
-           proc.send.send_json({'type' : 'log', 'debug' : raft.name + ' is now the leader'})
+           proc.send.send_json({'type' : 'log', 'debug' : raft.name + ' is now the leader', 'term' : raft.currentTerm})
         #Take care of any message requests you recieved
         while len(raft.leaderlessQueue) != 0:
             handle_get_set(raft.leaderlessQueue.pop(0))
