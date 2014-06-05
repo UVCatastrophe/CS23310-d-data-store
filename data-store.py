@@ -532,6 +532,9 @@ def transaction_reply(last):
     for i in range(last+1,raft.commitIndex+1):
         
         (term,opp,key,value,msg_id,fwd) = raft.log[i]
+        if len(raft.transactionQueue) != 0 and \
+           raft.transactionQueue[0].msg_id == msg_id:
+            raft.transactionQueue.pop(0)
         
         if opp == "set":
             data_store[key] = value
@@ -603,16 +606,19 @@ def handle_get_set(msg):
         elif len(raft.leaderlessQueue) != 0 and raft.leaderlessQueue[0].msg_id == msg_id:
             replyTimeout(raft.leaderlessQueue.pop(0))
     proc.loop.add_timeout(proc.loop.time() + LEADER_LEASE_TIME*4,callback)
-    if raft.leader == None:
-        raft.leaderlessQueue.append(msg)
-        return
 
-    if msg.sender == None:
-        raft.transactionQueue.append(msg)
+
     if not raft.isLeader:
-        msg.recpt = raft.leader
-        msg.sender = raft.name
-        send_message(msg)
+        #Queue the message until a leader has been decided
+        if raft.leader == None:
+            raft.leaderlessQueue.append(msg)
+        #Redirect to the leader
+        else:
+            raft.transactionQueue.append(msg)
+            msg.recpt = raft.leader
+            msg.sender = raft.name
+            send_message(msg)
+                
         return
 
     raft.log.append( (raft.currentTerm, msg.action, msg.key,msg.value,msg.msg_id,msg.sender) )
