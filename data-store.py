@@ -447,7 +447,6 @@ def handle_appendReply(msg):
         append_request(msg.sender)
         return
 
-# ********** BEGIN: Andrew's additions **********
 def handle_vote(msg):
     # Check if the candidate has a valid term.
     if msg.term < raft.currentTerm:
@@ -506,8 +505,6 @@ def handle_voteReply(msg):
         while len(raft.leaderlessQueue) != 0:
             handle_get_set(raft.leaderlessQueue.pop(0))
     
-# ********** END: Andrew's additions **********
-
 #attempt to become the leader by requesting votes from all of the process'
 #peers.
 def request_votes():
