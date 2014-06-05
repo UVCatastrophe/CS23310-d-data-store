@@ -2,11 +2,9 @@ start test --peer-names test2,test3
 start test2 --peer-names test,test3
 start test3 --peer-names test,test2
 send {"destination" : ["test"], "type" : "debug-startElection"}
-after 6 {
 set foo bar
 get foo
-after 4 {
 send {"destination" : ["test2"], "type" : "debug-startElection"}
+after 8 {
 get foo
-}
 }

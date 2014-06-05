@@ -52,13 +52,14 @@ class RAFT_instance:
             if peer == name or peer == "":
                 continue
             self.numPeers += 1
-            #nextIndex is STRICTLY greater than matchIndex
             self.lastHeard[peer] = proc.loop.time()
+            #nextIndex is STRICTLY greater than matchIndex
             self.nextIndex[peer] = 1
             self.matchIndex[peer] = 0
 
         #Add a global timeout to send hearbeat messages
         if self.isLeader:
+            return
             proc.loop.add_timeout(proc.loop.time() + (LEADER_LEASE_TIME/2), send_heartbeats)
 
     #Updates a LEADER's commit index to the lowest value in matchIndex
@@ -70,9 +71,13 @@ class RAFT_instance:
         counts.sort()
         oldCommit = self.commitIndex
         if len(counts) % 2 == 0:
-            self.commitIndex = counts[len(counts)/2 -1]
+            newCommit = counts[len(counts)/2 -1]
         else:
-            self.commitIndex = counts[len(counts)/2]
+            newCommit = counts[len(counts)/2]
+
+        if newCommit > oldCommit:
+            raft.commitIndex = newCommit
+
         return oldCommit
     #Updates the state of the process so that it is now the leader
     def makeLeader(self):
@@ -83,6 +88,7 @@ class RAFT_instance:
             self.leader = self.name
     #Sets the current term to the new term and changes appropriate state
     def new_term(self,term):
+        print raft.name + " rolling over to term " + str(term)
         assert term > self.currentTerm#Must be monotonicaly increasing
         self.currentTerm = term
         self.votedFor = None
@@ -309,8 +315,9 @@ def vote_response(msg, status):
 #given an append_message msg
 def update_commit(msg):
     if msg.leaderCommit > raft.commitIndex:
-        raft.commitIndex = min(msg.leaderCommit, msg.prevLogIndex)
-        for log in range(msg.prevLogIndex,raft.commitIndex):
+        raft.commitIndex = msg.leaderCommit
+        for i in range(raft.lastApplied,raft.commitIndex):
+            log = raft.log[i]
             #Update the value of the data-store to the most recent one
             if log[1] == "set":
                 #data_store[key] = val
@@ -404,6 +411,8 @@ def handle_appendReply(msg):
         raft.nextIndex[msg.sender] = m+1
         last = raft.update_commitIndex()
         #Update the datastore, send out set/get response messages for the newly updated commit indes
+        if last < raft.commitIndex:
+            send_heartbeats(refreash="False")
         transaction_reply(last)
         return
     else:
@@ -466,8 +475,8 @@ def handle_voteReply(msg):
         return
     
     if raft.numVotes >= (raft.numPeers + 1.0)/2:
+        print raft.name + " is now the leader. its commit index is " + str(raft.commitIndex)
         #leader election won.
-        print "HERE HERE HERE HERE"
         raft.makeLeader()
         send_heartbeats()
         #Take care of any message requests you recieved
@@ -479,6 +488,7 @@ def handle_voteReply(msg):
 #attempt to become the leader by requesting votes from all of the process'
 #peers.
 def request_votes():
+    print raft.name + " requesting votes"
     raft.new_term(raft.currentTerm + 1)
     raft.votedFor = raft.name
 
@@ -584,7 +594,8 @@ def handle_get_set(msg):
             send_message(msg)
                 
         return
-    
+
+    print raft.name + " handleing get/set request " + msg.action + " " + msg.key
     raft.log.append( (raft.currentTerm, msg.action, msg.key,msg.value,msg.msg_id,msg.sender) )
 
     send_appends()
@@ -638,9 +649,9 @@ def send_message(msg):
 #Sends a heartbeat message to all peers
 #Makes sure that they have heard from the leader.
 #Also serves to make sure that all logs are up to date on all replicas
-def send_heartbeats():
-    send_appends()
+def send_heartbeats(refreash=True):
     if raft.isLeader:
+        send_appends()
         proc.loop.add_timeout(proc.loop.time() + (LEADER_LEASE_TIME/2), send_heartbeats)
 
 #--------------------Initialization-------------------------------
