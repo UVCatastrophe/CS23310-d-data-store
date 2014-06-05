@@ -4,17 +4,11 @@ start test3 --peer-names test,test2,test4,test5
 start test4 --peer-names test,test2,test3,test5
 start test5 --peer-names test,test2,test3,test4
 send {"destination" : ["test"], "type" : "debug-startElection"}
+set foo bar
 after 10 {
-set foo bar 
-after 8 {
-split p test4,test5
-set foo 1
-set foo 1
-after 100 {
-join p
-after 100 {
+stop test3
+stop test4
 get foo
-}
-}
-}
+set foo 3
+get foo 
 }

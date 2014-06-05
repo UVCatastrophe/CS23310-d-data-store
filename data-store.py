@@ -304,13 +304,11 @@ def append_response(msg,status):
     send_message(res)
     return
 
-# ********** BEGIN: Andrew's additions ***********
 # responds to a vote message with the given status (True/False)
 def vote_response(msg, status):
     res = replyVote_message(raft.currentTerm, status, raft.name, msg.sender)
     send_message(res)
     return
-# ********* END: Andrew's additions **********
 
 #Update the 'commited' index of the current raft instance
 #given an append_message msg
@@ -389,7 +387,8 @@ def check_leader_timeout():
     if raft.isLeader:
         return
     if raft.lastHeard[raft.leader] + LEADER_LEASE_TIME < proc.loop.time():
-        print raft.name + " LEADER TIMEOUT"
+        if proc.logProgress:
+            proc.send.send_json({'type' : 'log', 'debug' : 'leader lease timeout' })
         request_votes()
     else:
         proc.loop.add_timeout(raft.lastHeard[raft.leader] + LEADER_LEASE_TIME, check_leader_timeout)
@@ -520,8 +519,6 @@ def request_votes():
 
 def check_election():
     if raft.leader == None:
-        if raft.name != "test4" and raft.name != "test5":
-            print raft.name + " requesting votes from check_election " 
         request_votes()
 
 #Sends replies to the broker for each transaction starting at last and going to committedIndex
@@ -615,7 +612,6 @@ def handle_get_set(msg):
                 
         return
 
-    print raft.name + " handleing get/set request " + msg.action + " " + msg.key
     raft.log.append( (raft.currentTerm, msg.action, msg.key,msg.value,msg.msg_id,msg.sender) )
 
     send_appends()
@@ -636,7 +632,6 @@ def send_appends():
         log_send = raft.log[nIndex:]
         app = append_message(raft.currentTerm,raft.name,nIndex-1,
                              prevTerm, log_send, raft.commitIndex, raft.name,peer)
-        #print "Sending append_message to " + peer
         send_message(app)
 
 #Handle the message,
