@@ -3,10 +3,10 @@ start test2 --peer-names test,test3,test4
 start test3 --peer-names test,test2,test4
 start test4 --peer-names test,test2,test3
 send {"destination" : ["test"], "type" : "debug-startElection"}
-after 6 from test{
+after 9 {
 set foo bar
-after 6 {
-drop 3 
+after 9 {
+drop 3 to test4 
 get foo
 get foo
 }

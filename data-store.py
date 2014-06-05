@@ -329,7 +329,7 @@ def update_commit(msg):
 def update_log(msg):
     #Remove any uncommited entries that conflict
     for i in range(msg.prevLogIndex+1,len(raft.log)):
-        raft.log.pop(i)
+        raft.log.pop()
 
     for log in msg.entries:
         raft.log.append(log)
@@ -464,8 +464,11 @@ def handle_voteReply(msg):
         print "DID NOT VOTE FOR SELF"
         return #You should not be recieving votes
     if msg.term > raft.currentTerm:
-        print "TERM OUT OF DATE"
         raft.new_term(msg.term)
+        return
+
+    if raft.isLeader:
+        #A quorum has already been reached
         return
 
     if msg.voteGranted:
