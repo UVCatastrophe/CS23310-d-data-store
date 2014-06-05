@@ -613,7 +613,7 @@ def handle_get_set(msg):
         raft.leaderlessQueue.append(msg)
         return
 
-    if raft.sender == None:
+    if msg.sender == None:
         raft.transactionQueue.append(msg)
 
     if not raft.isLeader:
