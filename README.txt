@@ -3,8 +3,11 @@ Roman Amici - amicir@gmail.com
 
 We implemented Raft
 
-Andrew - worked on all matters related to RequestVote RPC
-         wrote majority of the paper
-	 minor debugging help and pair programming
+Andrew - Worked on all matters related to RequestVote RPC
+         Wrote majority of the paper
+	 Debugging help and pair programming
 
-Roman - 
+Roman - Knew most of the implementation details (ZMQ, tornado)
+	Worked on AppendEntries RPC
+	Wrote all the scripts
+	Did most of the testing
